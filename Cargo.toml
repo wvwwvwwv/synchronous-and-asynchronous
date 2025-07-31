@@ -1,0 +1,31 @@
+[package]
+name = "saa"
+description = "Low-level synchronization primitives that provide both synchronous and asynchronous interfaces"
+documentation = "https://docs.rs/saa"
+version = "0.0.1"
+authors = ["wvwwvwwv <wvwwvwwv@me.com>"]
+edition = "2021"
+rust-version = "1.65.0"
+readme = "README.md"
+repository = "https://github.com/wvwwvwwv/synchronous-and-asynchronous/"
+license = "Apache-2.0"
+categories = ["asynchronous", "concurrency", "data-structures"]
+keywords = ["async", "concurrent", "tree"]
+
+[workspace]
+members = [".", "examples"]
+
+[dependencies]
+loom = { version = "0.7", optional = true }
+
+[features]
+loom = ["dep:loom"]
+
+[dev-dependencies]
+criterion = "0.7"
+futures = "0.3"
+tokio = { version = "1.47", features = ["full"] }
+
+[[bench]]
+name = "lock"
+harness = false
