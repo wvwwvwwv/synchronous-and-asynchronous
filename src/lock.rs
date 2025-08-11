@@ -469,7 +469,7 @@ impl Lock {
         let entry_addr = WaitQueue::ref_to_ptr(entry) as usize;
         debug_assert_eq!(entry_addr & (!Self::ADDR_MASK), 0);
 
-        entry.set_next_ptr(WaitQueue::addr_to_ptr(state & Self::ADDR_MASK));
+        entry.update_next_entry_ptr(WaitQueue::addr_to_ptr(state & Self::ADDR_MASK));
         let next_state = (state & (!Self::ADDR_MASK)) | entry_addr;
         self.state
             .compare_exchange(state, next_state, AcqRel, Acquire)
@@ -536,8 +536,8 @@ impl Lock {
         let mut result = Ok(state);
         WaitQueue::any_forward(tail_entry_ptr, |entry, next_entry| {
             if WaitQueue::ref_to_ptr(entry) == target_ptr {
-                if let Some(prev_entry) = unsafe { entry.prev_ptr().as_ref() } {
-                    prev_entry.set_next_ptr(entry.next_ptr());
+                if let Some(prev_entry) = unsafe { entry.prev_entry_ptr().as_ref() } {
+                    prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
                 } else {
                     let next_entry_ptr = next_entry.map_or(null(), WaitQueue::ref_to_ptr);
                     let next_state = (state & !Self::ADDR_MASK) | next_entry_ptr as usize;
@@ -550,7 +550,7 @@ impl Lock {
                     }
                 }
                 if let Some(next_entry) = next_entry {
-                    next_entry.set_prev_ptr(entry.prev_ptr());
+                    next_entry.update_prev_entry_ptr(entry.prev_entry_ptr());
                 }
                 true
             } else {
@@ -657,7 +657,7 @@ impl Lock {
                             .is_err()
                         {
                             // This entry will be processed on a retry.
-                            entry.set_next_ptr(null());
+                            entry.update_next_entry_ptr(null());
                             head_entry_ptr = WaitQueue::ref_to_ptr(entry);
                             return true;
                         }
@@ -671,7 +671,7 @@ impl Lock {
                     unlocked
                 } else {
                     // Unlink those that have succeeded in acquiring shared ownership.
-                    entry.set_next_ptr(null());
+                    entry.update_next_entry_ptr(null());
                     head_entry_ptr = WaitQueue::ref_to_ptr(entry);
                     true
                 }

@@ -17,25 +17,46 @@ use std::sync::{Condvar, Mutex};
 use std::task::Waker;
 use std::task::{Context, Poll};
 
+/// Fair and heap-free wait queue for locking primitives in this crate.
+///
+/// [`WaitQueue`] itself forms an intrusive linked list of entries where entries are pushed at the
+/// tail and popped from the head. [`WaitQueue`] is `128-byte` aligned thus allowing the lower 7
+/// bits in a pointer-sized scalar type variable to represent additional states.
 #[repr(align(128))]
 pub(crate) struct WaitQueue {
-    forward_link: AtomicPtr<Self>,
-    backward_link: AtomicPtr<Self>,
+    /// Points to the entry that was pushed right before this entry.
+    next_entry_ptr: AtomicPtr<Self>,
+    /// Points to the entry that was pushed right after this entry.
+    prev_entry_ptr: AtomicPtr<Self>,
+    /// The state of this entry.
     state: Mutex<State>,
-    condition_variable: Condvar,
+    /// Conditional variable to send a signal to a blocking/synchronous waiter.
+    cond_var: Condvar,
+    /// Cleanup function to be called when this entry is dropped without waiting for completion in
+    /// an asynchronous context.
     async_cleanup_fn: Option<AsyncContextCleaner>,
+    /// Flag to indicate that this entry has completed polling and got the result.
     async_poll_completed: AtomicBool,
+    /// Desired resources to wait, expressed in `usize`.
     desired_resource: usize,
 }
 
+/// Function to be invoked when [`WaitQueue`] is dropped before completion.
+///
+/// The first `usize` argument is passed to the function along with `self`.
 type AsyncContextCleaner = (usize, fn(&WaitQueue, usize));
 
 /// State of the wait queue.
 #[derive(Debug)]
 enum State {
+    /// The [`WaitQueue`] has been created.
     Initialized,
+    /// The [`WaitQueue`] is waiting for resources in a blocking/synchronous context.
     Waiting,
+    /// The [`WaitQueue`] is polling until it gets resources or cancelled in an asynchronous
+    /// context.
     Polling(Waker),
+    /// The result is ready.
     ResultReady(bool),
 }
 
@@ -55,6 +76,7 @@ macro_rules! _miri_scope_protector {
 }
 
 impl WaitQueue {
+    /// Creates a new [`WaitQueue`].
     #[cfg(feature = "loom")]
     pub(crate) fn new(
         desired_resources: usize,
@@ -71,31 +93,62 @@ impl WaitQueue {
         }
     }
 
+    /// Creates a new [`WaitQueue`].
     #[cfg(not(feature = "loom"))]
     pub(crate) const fn new(
         desired_resources: usize,
         async_cleanup_fn: Option<AsyncContextCleaner>,
     ) -> Self {
         Self {
-            forward_link: AtomicPtr::new(null_mut()),
-            backward_link: AtomicPtr::new(null_mut()),
+            next_entry_ptr: AtomicPtr::new(null_mut()),
+            prev_entry_ptr: AtomicPtr::new(null_mut()),
             state: Mutex::new(State::Initialized),
-            condition_variable: Condvar::new(),
+            cond_var: Condvar::new(),
             async_cleanup_fn,
             async_poll_completed: AtomicBool::new(false),
             desired_resource: desired_resources,
         }
     }
 
+    /// Gets a raw pointer to the next entry.
+    ///
+    /// The next entry is the one that was pushed right before this entry.
+    pub(crate) fn next_entry_ptr(&self) -> *const Self {
+        self.next_entry_ptr.load(Acquire)
+    }
+
+    /// Gets a raw pointer to the previous entry.
+    ///
+    /// The previous entry is the one that was pushed right after this entry.
+    pub(crate) fn prev_entry_ptr(&self) -> *const Self {
+        self.prev_entry_ptr.load(Acquire)
+    }
+
+    /// Updates the next entry pointer.
+    pub(crate) fn update_next_entry_ptr(&self, next_ptr: *const Self) {
+        debug_assert_eq!(next_ptr as usize % align_of::<Self>(), 0);
+        self.next_entry_ptr.store(next_ptr.cast_mut(), Release);
+    }
+
+    /// Updates the previous entry pointer.
+    pub(crate) fn update_prev_entry_ptr(&self, prev_ptr: *const Self) {
+        debug_assert_eq!(prev_ptr as usize % align_of::<Self>(), 0);
+        self.prev_entry_ptr.store(prev_ptr.cast_mut(), Release);
+    }
+
+    /// Returns its `usize` data that represents the desired resources.
     pub(crate) const fn desired_resources(&self) -> usize {
         self.desired_resource
     }
 
+    /// Converts a reference to `Self` to a raw pointer.
     pub(crate) fn ref_to_ptr(this: &Self) -> *const Self {
         let wait_queue_ptr: *const Self = addr_of!(*this);
+        debug_assert_eq!(wait_queue_ptr as usize % align_of::<Self>(), 0);
         wait_queue_ptr
     }
 
+    /// Converts the memory address of `Self` to a raw pointer.
     pub(crate) fn addr_to_ptr(wait_queue_addr: usize) -> *const Self {
         debug_assert_eq!(wait_queue_addr % align_of::<Self>(), 0);
         wait_queue_addr as *const Self
@@ -105,12 +158,12 @@ impl WaitQueue {
         let mut current_waiter_ptr = wait_queue_tail_ptr;
         while !current_waiter_ptr.is_null() {
             current_waiter_ptr = unsafe {
-                let next_waiter_ptr = (*current_waiter_ptr).next_ptr();
+                let next_waiter_ptr = (*current_waiter_ptr).next_entry_ptr();
                 if let Some(next_waiter) = next_waiter_ptr.as_ref() {
-                    if next_waiter.prev_ptr().is_null() {
-                        next_waiter.set_prev_ptr(current_waiter_ptr);
+                    if next_waiter.prev_entry_ptr().is_null() {
+                        next_waiter.update_prev_entry_ptr(current_waiter_ptr);
                     } else {
-                        debug_assert_eq!(next_waiter.prev_ptr(), current_waiter_ptr);
+                        debug_assert_eq!(next_waiter.prev_entry_ptr(), current_waiter_ptr);
                         return;
                     }
                 }
@@ -126,9 +179,9 @@ impl WaitQueue {
         let mut current_waiter_ptr = wait_queue_tail_ptr;
         while !current_waiter_ptr.is_null() {
             current_waiter_ptr = unsafe {
-                let next_waiter_ptr = (*current_waiter_ptr).next_ptr();
+                let next_waiter_ptr = (*current_waiter_ptr).next_entry_ptr();
                 if let Some(next_waiter) = next_waiter_ptr.as_ref() {
-                    next_waiter.set_prev_ptr(current_waiter_ptr);
+                    next_waiter.update_prev_entry_ptr(current_waiter_ptr);
                 }
 
                 let _miri_scope_protector = _miri_scope_protector!();
@@ -148,7 +201,7 @@ impl WaitQueue {
         let mut current_waiter_ptr = wait_queue_head_ptr;
         while !current_waiter_ptr.is_null() {
             current_waiter_ptr = unsafe {
-                let prev_waiter_ptr = (*current_waiter_ptr).prev_ptr();
+                let prev_waiter_ptr = (*current_waiter_ptr).prev_entry_ptr();
                 let _miri_scope_protector = _miri_scope_protector!();
                 if f(&*current_waiter_ptr, prev_waiter_ptr.as_ref()) {
                     return true;
@@ -163,7 +216,7 @@ impl WaitQueue {
         if let Ok(mut state) = self.state.lock() {
             match replace::<State>(&mut *state, State::ResultReady(result)) {
                 State::Waiting => {
-                    self.condition_variable.notify_one();
+                    self.cond_var.notify_one();
                 }
                 State::Polling(waker) => {
                     waker.wake();
@@ -171,22 +224,6 @@ impl WaitQueue {
                 State::ResultReady(_) | State::Initialized => (),
             }
         }
-    }
-
-    pub(crate) fn next_ptr(&self) -> *const Self {
-        self.forward_link.load(Acquire)
-    }
-
-    pub(crate) fn prev_ptr(&self) -> *const Self {
-        self.backward_link.load(Acquire)
-    }
-
-    pub(crate) fn set_next_ptr(&self, next_ptr: *const Self) {
-        self.forward_link.store(next_ptr.cast_mut(), Release);
-    }
-
-    pub(crate) fn set_prev_ptr(&self, next_ptr: *const Self) {
-        self.backward_link.store(next_ptr.cast_mut(), Release);
     }
 
     pub(crate) fn poll_result(&self) -> bool {
@@ -204,7 +241,7 @@ impl WaitQueue {
 
             // `loom` does not implement `wait_while`, so use a loop instead.
             while !matches!(*state, State::ResultReady(_)) {
-                if let Ok(returned) = self.condition_variable.wait(state) {
+                if let Ok(returned) = self.cond_var.wait(state) {
                     state = returned;
                 } else {
                     debug_assert!(false, "The mutex can never be poisoned");
@@ -228,10 +265,10 @@ impl WaitQueue {
 impl fmt::Debug for WaitQueue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WaitQueue")
-            .field("forward_link", &self.forward_link)
-            .field("backward_link", &self.backward_link)
+            .field("forward_link", &self.next_entry_ptr)
+            .field("backward_link", &self.prev_entry_ptr)
             .field("state", &self.state)
-            .field("condition_variable", &self.condition_variable)
+            .field("condition_variable", &self.cond_var)
             .field("has_async_cleanup_fn", &self.async_cleanup_fn.is_some())
             .field("async_poll_completed", &self.async_poll_completed)
             .field("desired_resource", &self.desired_resource)
