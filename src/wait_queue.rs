@@ -83,10 +83,10 @@ impl WaitQueue {
         async_cleanup_fn: Option<AsyncContextCleaner>,
     ) -> Self {
         Self {
-            forward_link: AtomicPtr::new(null_mut()),
-            backward_link: AtomicPtr::new(null_mut()),
+            next_entry_ptr: AtomicPtr::new(null_mut()),
+            prev_entry_ptr: AtomicPtr::new(null_mut()),
             state: Mutex::new(State::Initialized),
-            condition_variable: Condvar::new(),
+            cond_var: Condvar::new(),
             async_cleanup_fn,
             async_poll_completed: AtomicBool::new(false),
             desired_resource: desired_resources,
@@ -125,15 +125,17 @@ impl WaitQueue {
     }
 
     /// Updates the next entry pointer.
-    pub(crate) fn update_next_entry_ptr(&self, next_ptr: *const Self) {
-        debug_assert_eq!(next_ptr as usize % align_of::<Self>(), 0);
-        self.next_entry_ptr.store(next_ptr.cast_mut(), Release);
+    pub(crate) fn update_next_entry_ptr(&self, next_entry_ptr: *const Self) {
+        debug_assert_eq!(next_entry_ptr as usize % align_of::<Self>(), 0);
+        self.next_entry_ptr
+            .store(next_entry_ptr.cast_mut(), Release);
     }
 
     /// Updates the previous entry pointer.
-    pub(crate) fn update_prev_entry_ptr(&self, prev_ptr: *const Self) {
-        debug_assert_eq!(prev_ptr as usize % align_of::<Self>(), 0);
-        self.prev_entry_ptr.store(prev_ptr.cast_mut(), Release);
+    pub(crate) fn update_prev_entry_ptr(&self, prev_entry_ptr: *const Self) {
+        debug_assert_eq!(prev_entry_ptr as usize % align_of::<Self>(), 0);
+        self.prev_entry_ptr
+            .store(prev_entry_ptr.cast_mut(), Release);
     }
 
     /// Returns its `usize` data that represents the desired resources.
@@ -154,63 +156,68 @@ impl WaitQueue {
         wait_queue_addr as *const Self
     }
 
-    pub(crate) fn install_backward_link(wait_queue_tail_ptr: *const Self) {
-        let mut current_waiter_ptr = wait_queue_tail_ptr;
-        while !current_waiter_ptr.is_null() {
-            current_waiter_ptr = unsafe {
-                let next_waiter_ptr = (*current_waiter_ptr).next_entry_ptr();
-                if let Some(next_waiter) = next_waiter_ptr.as_ref() {
-                    if next_waiter.prev_entry_ptr().is_null() {
-                        next_waiter.update_prev_entry_ptr(current_waiter_ptr);
+    /// Installs a pointer to the previous entry on each entry by forward-iterating over entries.
+    pub(crate) fn install_backward_link(tail_entry_ptr: *const Self) {
+        let mut entry_ptr = tail_entry_ptr;
+        while !entry_ptr.is_null() {
+            entry_ptr = unsafe {
+                let next_entry_ptr = (*entry_ptr).next_entry_ptr();
+                if let Some(next_entry) = next_entry_ptr.as_ref() {
+                    if next_entry.prev_entry_ptr().is_null() {
+                        next_entry.update_prev_entry_ptr(entry_ptr);
                     } else {
-                        debug_assert_eq!(next_waiter.prev_entry_ptr(), current_waiter_ptr);
+                        debug_assert_eq!(next_entry.prev_entry_ptr(), entry_ptr);
                         return;
                     }
                 }
-                next_waiter_ptr
+                next_entry_ptr
             };
         }
     }
 
+    /// Forward-iterates over entries, and returns `true` when the supplied closure returns `true`.
     pub(crate) fn any_forward<F: FnMut(&Self, Option<&Self>) -> bool>(
-        wait_queue_tail_ptr: *const Self,
+        tail_entry_ptr: *const Self,
         mut f: F,
     ) -> bool {
-        let mut current_waiter_ptr = wait_queue_tail_ptr;
-        while !current_waiter_ptr.is_null() {
-            current_waiter_ptr = unsafe {
-                let next_waiter_ptr = (*current_waiter_ptr).next_entry_ptr();
-                if let Some(next_waiter) = next_waiter_ptr.as_ref() {
-                    next_waiter.update_prev_entry_ptr(current_waiter_ptr);
+        let mut entry_ptr = tail_entry_ptr;
+        while !entry_ptr.is_null() {
+            entry_ptr = unsafe {
+                let next_entry_ptr = (*entry_ptr).next_entry_ptr();
+                if let Some(next_entry) = next_entry_ptr.as_ref() {
+                    next_entry.update_prev_entry_ptr(entry_ptr);
                 }
 
                 let _miri_scope_protector = _miri_scope_protector!();
-                if f(&*current_waiter_ptr, next_waiter_ptr.as_ref()) {
+                if f(&*entry_ptr, next_entry_ptr.as_ref()) {
                     return true;
                 }
-                next_waiter_ptr
+                next_entry_ptr
             };
         }
         false
     }
 
+    /// Backward-iterates over entries, and returns `true` when the supplied closure returns `true`.
     pub(crate) fn any_backward<F: FnMut(&Self, Option<&Self>) -> bool>(
-        wait_queue_head_ptr: *const Self,
+        head_entry_ptr: *const Self,
         mut f: F,
     ) -> bool {
-        let mut current_waiter_ptr = wait_queue_head_ptr;
-        while !current_waiter_ptr.is_null() {
-            current_waiter_ptr = unsafe {
-                let prev_waiter_ptr = (*current_waiter_ptr).prev_entry_ptr();
+        let mut entry_ptr = head_entry_ptr;
+        while !entry_ptr.is_null() {
+            entry_ptr = unsafe {
+                let prev_entry_ptr = (*entry_ptr).prev_entry_ptr();
                 let _miri_scope_protector = _miri_scope_protector!();
-                if f(&*current_waiter_ptr, prev_waiter_ptr.as_ref()) {
+                if f(&*entry_ptr, prev_entry_ptr.as_ref()) {
                     return true;
                 }
-                prev_waiter_ptr
+                prev_entry_ptr
             };
         }
         false
     }
+
+    /// Sets the result to the entry.
     pub(crate) fn set_result(&self, result: bool) {
         let _miri_scope_protector = _miri_scope_protector!();
         if let Ok(mut state) = self.state.lock() {
@@ -226,6 +233,7 @@ impl WaitQueue {
         }
     }
 
+    /// Polls the result, synchronously.
     pub(crate) fn poll_result(&self) -> bool {
         while let Ok(mut state) = self.state.lock() {
             match &*state {
@@ -257,6 +265,7 @@ impl WaitQueue {
         false
     }
 
+    /// Returns `true` if asynchronous polling was successfully completed.
     pub(crate) fn async_poll_completed(&self) -> bool {
         self.async_poll_completed.load(Acquire)
     }
