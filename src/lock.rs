@@ -348,11 +348,37 @@ impl Lock {
             } else {
                 Self::SHARED
             },
-            Some((self.self_addr(), Self::cleanup_async_context)),
+            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
         );
         let mut async_wait_pinned = Pin::new(&mut async_wait);
         if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
             async_wait_pinned.set_result(false);
+        }
+    }
+
+    /// Checks if the lock expressed in `mode` can be released from the [`Lock`] represented by
+    /// `state`.
+    const fn can_release(state: usize, mode: Opcode) -> bool {
+        match mode {
+            Opcode::Shared => {
+                let count = state & Self::LOCK_MASK;
+                count >= Self::SHARED && count != Self::EXCLUSIVE
+            }
+            Opcode::Exclusive => {
+                let count = state & Self::LOCK_MASK;
+                count == Self::EXCLUSIVE
+            }
+            Opcode::Cleanup => true,
+        }
+    }
+
+    /// Converts the operation mode into a `usize` value representing the count to be subtracted
+    /// from a [`Lock`] state.
+    const fn release_count(mode: Opcode) -> usize {
+        match mode {
+            Opcode::Shared => Self::SHARED,
+            Opcode::Exclusive => Self::EXCLUSIVE,
+            Opcode::Cleanup => 0,
         }
     }
 
@@ -361,7 +387,7 @@ impl Lock {
         debug_assert!(state & Self::ADDR_MASK != 0 || state & Self::LOCK_MASK != 0);
         let mut async_wait = WaitQueue::new(
             Self::EXCLUSIVE,
-            Some((self.self_addr(), Self::cleanup_async_context)),
+            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
         );
         let mut async_wait_pinned = Pin::new(&mut async_wait);
         if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
@@ -416,7 +442,7 @@ impl Lock {
         );
         let mut async_wait = WaitQueue::new(
             Self::SHARED,
-            Some((self.self_addr(), Self::cleanup_async_context)),
+            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
         );
         let mut async_wait_pinned = Pin::new(&mut async_wait);
         if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
@@ -464,6 +490,7 @@ impl Lock {
         }
     }
 
+    /// Tries to push a wait queue entry into the wait queue.
     #[must_use]
     fn try_push_wait_queue_entry(&self, entry: &mut Pin<&mut WaitQueue>, state: usize) -> bool {
         let entry_addr = WaitQueue::ref_to_ptr(entry) as usize;
@@ -474,28 +501,6 @@ impl Lock {
         self.state
             .compare_exchange(state, next_state, AcqRel, Acquire)
             .is_ok()
-    }
-
-    fn can_release(state: usize, mode: Opcode) -> bool {
-        match mode {
-            Opcode::Shared => {
-                let count = state & Self::LOCK_MASK;
-                count >= Self::SHARED && count != Self::EXCLUSIVE
-            }
-            Opcode::Exclusive => {
-                let count = state & Self::LOCK_MASK;
-                count == Self::EXCLUSIVE
-            }
-            Opcode::Cleanup => true,
-        }
-    }
-
-    fn release_count(mode: Opcode) -> usize {
-        match mode {
-            Opcode::Shared => Self::SHARED,
-            Opcode::Exclusive => Self::EXCLUSIVE,
-            Opcode::Cleanup => 0,
-        }
     }
 
     /// Releases the supplied count of shares of the lock.
@@ -576,7 +581,7 @@ impl Lock {
             debug_assert_eq!(state & Self::WAIT_QUEUE_LOCKED, Self::WAIT_QUEUE_LOCKED);
 
             if entry_addr_to_remove != 0 {
-                state = match self.unlink(state, entry_addr_to_remove) {
+                state = match self.remove_wait_queue_entry(state, entry_addr_to_remove) {
                     Ok(new_state) => {
                         entry_addr_to_remove = 0;
                         new_state
@@ -685,7 +690,12 @@ impl Lock {
         self_ptr as usize
     }
 
-    fn unlink(&self, state: usize, entry_addr_to_remove: usize) -> Result<usize, usize> {
+    /// Removes a wait queue entry from the wait queue.
+    fn remove_wait_queue_entry(
+        &self,
+        state: usize,
+        entry_addr_to_remove: usize,
+    ) -> Result<usize, usize> {
         debug_assert_eq!(state & Self::WAIT_QUEUE_LOCKED, Self::WAIT_QUEUE_LOCKED);
         debug_assert_ne!(state & Self::ADDR_MASK, 0);
 
@@ -718,7 +728,9 @@ impl Lock {
         result
     }
 
-    fn cleanup_async_context(entry: &WaitQueue, self_addr: usize) {
+    /// Cleans up a [`WaitQueue`] entry that was pushed into the wait queue, but has not been
+    /// processed.
+    fn cleanup_wait_queue_entry(entry: &WaitQueue, self_addr: usize) {
         let this: &Self = unsafe { &*(self_addr as *const Self) };
         let wait_queue_ptr: *const WaitQueue = addr_of!(*entry);
         let wait_queue_addr = wait_queue_ptr as usize;
