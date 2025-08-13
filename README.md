@@ -20,4 +20,8 @@ Low-level synchronization primitives that provide both synchronous and asynchron
 
 `saa::Lock` is a Low-level shared-exclusive lock that provides both synchronous and asynchronous interfaces. Synchronous locking methods such as `lock_exclusive_sync` or `lock_shared_sync` can be used with their asynchronous counterparts, `lock_exclusive_async` or `lock_shared_async`, at the same time. `saa::Lock` implements a heap-allocation-free fair wait queue that is shared among both synchronous and asynchronous methods.
 
+### Semaphore
+
+`saa::Semaphore` is a synchronization primitive that allows a fixed number of threads to access a resource concurrently.
+
 ## [Changelog](https://github.com/wvwwvwwv/synchronous-and-asynchronous/blob/main/CHANGELOG.md)

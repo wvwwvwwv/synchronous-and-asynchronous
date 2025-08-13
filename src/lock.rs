@@ -1,4 +1,4 @@
-//! Low-level locking primitives for both synchronous and asynchronous operations.
+//! [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 
 use crate::wait_queue::WaitQueue;
 #[cfg(feature = "loom")]
@@ -11,12 +11,17 @@ use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release};
 use std::{fmt, thread};
 
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
+///
+/// The locking semantics is similar to [`RwLock`](std::sync::RwLock), however, [`Lock`] only
+/// provides low-level locking and un-locking methods, hence forcing the user to manage the scope of
+/// acquired locks and resources to protect.
 #[derive(Default)]
 pub struct Lock {
+    // State of the [`Lock`].
     state: AtomicUsize,
 }
 
-/// Locking operation types.
+/// Operation types.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum Opcode {
     /// Acquire exclusive ownership.
@@ -36,14 +41,15 @@ impl Lock {
     const EXCLUSIVE: usize = Self::LOCK_MASK;
     /// Represents a single shared owner.
     const SHARED: usize = 1_usize;
-    /// Maximum number of shared owners.
-    const MAX_SHARED_OWNERS: usize = Self::LOCK_MASK - Self::SHARED;
 
     /// Indicates that the wait queue is being processed by a thread.
     const WAIT_QUEUE_LOCKED: usize = 1_usize << Self::LOCK_BITS;
 
     /// Mask to extract a wait queue entry pointer.
     const ADDR_MASK: usize = !((1_usize << (1 + Self::LOCK_BITS)) - 1);
+
+    /// Maximum number of shared owners.
+    pub const MAX_SHARED_OWNERS: usize = Self::LOCK_MASK - Self::SHARED;
 
     /// Returns `true` if the lock is currently free.
     ///
@@ -65,7 +71,7 @@ impl Lock {
         (state & Self::EXCLUSIVE) == 0
     }
 
-    /// Returns `true` if the lock is currently locked.
+    /// Returns `true` if an exclusive lock is currently held.
     ///
     /// # Examples
     ///
@@ -85,7 +91,7 @@ impl Lock {
         (self.state.load(mo) & Self::EXCLUSIVE) == Self::EXCLUSIVE
     }
 
-    /// Returns `true` if the lock is currently shared.
+    /// Returns `true` if a shared lock is currently held.
     ///
     /// # Examples
     ///
@@ -107,7 +113,22 @@ impl Lock {
         share_state != 0 && share_state != Self::EXCLUSIVE
     }
 
-    /// Acquires the exclusive lock, asynchronously.
+    /// Acquires an exclusive lock asynchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// async {
+    ///     lock.lock_exclusive_async().await;
+    ///     assert!(lock.is_locked(Relaxed));
+    ///     assert!(!lock.is_shared(Relaxed))
+    /// };
+    /// ```
     #[inline]
     pub async fn lock_exclusive_async(&self) {
         loop {
@@ -115,13 +136,13 @@ impl Lock {
             if result {
                 return;
             }
-            if self.lock_wait_async(state).await {
+            if self.wait_exclusive_lock_async(state).await {
                 return;
             }
         }
     }
 
-    /// Acquires the exclusive lock, synchronously.
+    /// Acquires an exclusive lock synchronously.
     ///
     /// # Examples
     ///
@@ -143,15 +164,15 @@ impl Lock {
             if result {
                 return;
             }
-            if self.lock_wait_sync(state) {
+            if self.wait_exclusive_lock_sync(state) {
                 return;
             }
         }
     }
 
-    /// Tries to acquire the exclusive lock.
+    /// Tries to acquire an exclusive lock.
     ///
-    /// Returns `false` if the lock has already been locked or shared.
+    /// Returns `false` if the lock was not free.
     ///
     /// # Examples
     ///
@@ -169,7 +190,22 @@ impl Lock {
         self.try_lock_exclusive_internal().0
     }
 
-    /// Tries to share the lock.
+    /// Acquires a shared lock asynchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// async {
+    ///     lock.lock_shared_async().await;
+    ///     assert!(!lock.is_locked(Relaxed));
+    ///     assert!(lock.is_shared(Relaxed))
+    /// };
+    /// ```
     #[inline]
     pub async fn lock_shared_async(&self) {
         loop {
@@ -177,16 +213,13 @@ impl Lock {
             if result {
                 return;
             }
-            if self.share_wait_async(state).await {
+            if self.wait_shared_lock_async(state).await {
                 return;
             }
         }
     }
 
-    /// Shares the lock.
-    ///
-    /// Returns `false` if the [`Lock`] has been locked or the maximum number of shared owners has
-    /// been reached.
+    /// Acquires a shared lock synchronously.
     ///
     /// # Examples
     ///
@@ -208,16 +241,16 @@ impl Lock {
             if result {
                 return;
             }
-            if self.share_wait_sync(state) {
+            if self.wait_shared_lock_sync(state) {
                 return;
             }
         }
     }
 
-    /// Tries to share the lock.
+    /// Tries to acquire a shared lock.
     ///
-    /// Returns `false` if the [`Lock`] has been locked or the maximum number of shared owners has
-    /// been reached.
+    /// Returns `false` if an exclusive lock was acquired or the number of shared owners has reached
+    /// [`Self::MAX_SHARED_OWNERS`].
     ///
     /// # Examples
     ///
@@ -235,9 +268,9 @@ impl Lock {
         self.try_lock_shared_internal().0
     }
 
-    /// Unlocks the lock.
+    /// Releases an exclusive lock.
     ///
-    /// Returns `true` if the lock was previously locked.
+    /// Returns `true` if an exclusive lock was previously held and successfully released.
     ///
     /// # Examples
     ///
@@ -265,9 +298,9 @@ impl Lock {
         }
     }
 
-    /// Unshares the lock.
+    /// Releases a shared lock.
     ///
-    /// Returns `true` if the lock was previously shared.
+    /// Returns `true` if a shared lock was previously held and successfully released.
     ///
     /// # Examples
     ///
@@ -298,7 +331,7 @@ impl Lock {
         }
     }
 
-    /// Tests whether dropping a wait queue entry without completing it is safe.
+    /// Tests whether dropping a wait queue entry without waiting for its completion is safe.
     #[cfg(test)]
     pub fn test_drop_wait_queue_entry(&self, exclusive: bool) {
         let (result, state) = if exclusive {
@@ -315,7 +348,7 @@ impl Lock {
             } else {
                 Self::SHARED
             },
-            Some((self.self_addr(), Self::cleanup_wait_queue)),
+            Some((self.self_addr(), Self::cleanup_async_context)),
         );
         let mut async_wait_pinned = Pin::new(&mut async_wait);
         if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
@@ -323,50 +356,12 @@ impl Lock {
         }
     }
 
-    fn self_addr(&self) -> usize {
-        let self_ptr: *const Self = addr_of!(*self);
-        self_ptr as usize
-    }
-
-    fn cleanup_wait_queue(wait_queue: &WaitQueue, self_addr: usize) {
-        let this: &Self = unsafe { &*(self_addr as *const Self) };
-        let wait_queue_ptr: *const WaitQueue = addr_of!(*wait_queue);
-        let wait_queue_addr = wait_queue_ptr as usize;
-
-        // Remove the wait queue entry from the wait queue list.
-        let mut state = this.state.load(Acquire);
-        if state & Self::ADDR_MASK != 0 {
-            while let Err(new_state) =
-                this.try_process_wait_queue(state, wait_queue_addr, Opcode::Cleanup)
-            {
-                if new_state & Self::WAIT_QUEUE_LOCKED == Self::WAIT_QUEUE_LOCKED {
-                    // Another thread is processing the wait queue.
-                    thread::yield_now();
-                    state = new_state;
-                    debug_assert_ne!(state & Self::ADDR_MASK, 0);
-                    continue;
-                }
-                // The wait queue is empty.
-                debug_assert_eq!(new_state & Self::ADDR_MASK, 0);
-                break;
-            }
-        }
-
-        // Release any acquired locks if the wait queue was processed.
-        if wait_queue.async_poll_completed() {
-            if wait_queue.desired_resources() == Self::EXCLUSIVE {
-                this.unlock_exclusive();
-            } else {
-                this.unlock_shared();
-            }
-        }
-    }
-
-    async fn lock_wait_async(&self, state: usize) -> bool {
+    /// Waits for an exclusive lock asynchronously.
+    async fn wait_exclusive_lock_async(&self, state: usize) -> bool {
         debug_assert!(state & Self::ADDR_MASK != 0 || state & Self::LOCK_MASK != 0);
         let mut async_wait = WaitQueue::new(
             Self::EXCLUSIVE,
-            Some((self.self_addr(), Self::cleanup_wait_queue)),
+            Some((self.self_addr(), Self::cleanup_async_context)),
         );
         let mut async_wait_pinned = Pin::new(&mut async_wait);
         if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
@@ -375,8 +370,9 @@ impl Lock {
         async_wait_pinned.await
     }
 
+    /// Waits for an exclusive lock synchronously.
     #[must_use]
-    fn lock_wait_sync(&self, state: usize) -> bool {
+    fn wait_exclusive_lock_sync(&self, state: usize) -> bool {
         debug_assert!(state & Self::ADDR_MASK != 0 || state & Self::LOCK_MASK != 0);
         let mut sync_wait = WaitQueue::new(Self::EXCLUSIVE, None);
         let mut sync_wait_pinned = Pin::new(&mut sync_wait);
@@ -386,6 +382,7 @@ impl Lock {
         sync_wait_pinned.poll_result()
     }
 
+    /// Tries to acquire an exclusive lock.
     fn try_lock_exclusive_internal(&self) -> (bool, usize) {
         let Err(mut state) = self
             .state
@@ -412,13 +409,14 @@ impl Lock {
         }
     }
 
-    async fn share_wait_async(&self, state: usize) -> bool {
+    /// Waits for a shared lock to be available asynchronously.
+    async fn wait_shared_lock_async(&self, state: usize) -> bool {
         debug_assert!(
             state & Self::ADDR_MASK != 0 || state & Self::LOCK_MASK >= Self::MAX_SHARED_OWNERS
         );
         let mut async_wait = WaitQueue::new(
             Self::SHARED,
-            Some((self.self_addr(), Self::cleanup_wait_queue)),
+            Some((self.self_addr(), Self::cleanup_async_context)),
         );
         let mut async_wait_pinned = Pin::new(&mut async_wait);
         if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
@@ -427,8 +425,9 @@ impl Lock {
         async_wait_pinned.await
     }
 
+    /// Waits for a shared lock to be available synchronously.
     #[must_use]
-    fn share_wait_sync(&self, state: usize) -> bool {
+    fn wait_shared_lock_sync(&self, state: usize) -> bool {
         debug_assert!(
             state & Self::ADDR_MASK != 0 || state & Self::LOCK_MASK >= Self::MAX_SHARED_OWNERS
         );
@@ -440,6 +439,7 @@ impl Lock {
         sync_wait_pinned.poll_result()
     }
 
+    /// Tries to acquire a shared lock.
     fn try_lock_shared_internal(&self) -> (bool, usize) {
         let Err(mut state) = self
             .state
@@ -527,44 +527,11 @@ impl Lock {
         false
     }
 
-    fn unlink(&self, state: usize, entry_addr_to_remove: usize) -> Result<usize, usize> {
-        debug_assert_eq!(state & Self::WAIT_QUEUE_LOCKED, Self::WAIT_QUEUE_LOCKED);
-        debug_assert_ne!(state & Self::ADDR_MASK, 0);
-
-        let tail_entry_ptr = WaitQueue::addr_to_ptr(state & Self::ADDR_MASK);
-        let target_ptr = WaitQueue::addr_to_ptr(entry_addr_to_remove);
-        let mut result = Ok(state);
-        WaitQueue::any_forward(tail_entry_ptr, |entry, next_entry| {
-            if WaitQueue::ref_to_ptr(entry) == target_ptr {
-                if let Some(prev_entry) = unsafe { entry.prev_entry_ptr().as_ref() } {
-                    prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
-                } else {
-                    let next_entry_ptr = next_entry.map_or(null(), WaitQueue::ref_to_ptr);
-                    let next_state = (state & !Self::ADDR_MASK) | next_entry_ptr as usize;
-                    match self
-                        .state
-                        .compare_exchange(state, next_state, AcqRel, Acquire)
-                    {
-                        Ok(_) => result = Ok(next_state),
-                        Err(new_state) => result = Err(new_state),
-                    }
-                }
-                if let Some(next_entry) = next_entry {
-                    next_entry.update_prev_entry_ptr(entry.prev_entry_ptr());
-                }
-                true
-            } else {
-                false
-            }
-        });
-        result
-    }
-
-    /// Tries to start processing the wait queue by marking that the current thread is processing
-    /// the wait queue and subtracting the count from the `LOCK_SHARE_COUNT` field.
+    /// Tries to start processing the wait queue by releasing a lock of the specified type and
+    /// locking the wait queue.
     ///
-    /// Returns an error if another thread is processing the wait queue or the count cannot be
-    /// subtracted.
+    /// Returns the updated state if successful, or returns the latest state as an error if another
+    /// thread was processing the wait queue or the lock could not be released.
     fn try_start_process_wait_queue(&self, mut state: usize, mode: Opcode) -> Result<usize, usize> {
         if state & Self::ADDR_MASK == 0
             || state & Self::WAIT_QUEUE_LOCKED == Self::WAIT_QUEUE_LOCKED
@@ -590,10 +557,11 @@ impl Lock {
         Ok(next_state)
     }
 
-    /// Tries to process the wait queue and subtracts the release count from the lock.
+    /// Tries to process the wait queue after releasing a lock of the specified type and locking the
+    /// wait queue.
     ///
-    /// Returns `Err` if marking that it is processing the wait queue failed, the wait queue no
-    /// longer needs to be processed, of the count exceeds the `LOCK_SHARE_COUNT` field.
+    /// Returns `Err` if locking the wait queue failed, the wait queue no longer needs to be
+    /// processed, of the wrong argument was supplied.
     fn try_process_wait_queue(
         &self,
         mut state: usize,
@@ -707,6 +675,79 @@ impl Lock {
 
             if unlocked {
                 return Ok(());
+            }
+        }
+    }
+
+    /// Converts a reference to `Self` into a memory address.
+    fn self_addr(&self) -> usize {
+        let self_ptr: *const Self = addr_of!(*self);
+        self_ptr as usize
+    }
+
+    fn unlink(&self, state: usize, entry_addr_to_remove: usize) -> Result<usize, usize> {
+        debug_assert_eq!(state & Self::WAIT_QUEUE_LOCKED, Self::WAIT_QUEUE_LOCKED);
+        debug_assert_ne!(state & Self::ADDR_MASK, 0);
+
+        let tail_entry_ptr = WaitQueue::addr_to_ptr(state & Self::ADDR_MASK);
+        let target_ptr = WaitQueue::addr_to_ptr(entry_addr_to_remove);
+        let mut result = Ok(state);
+        WaitQueue::any_forward(tail_entry_ptr, |entry, next_entry| {
+            if WaitQueue::ref_to_ptr(entry) == target_ptr {
+                if let Some(prev_entry) = unsafe { entry.prev_entry_ptr().as_ref() } {
+                    prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
+                } else {
+                    let next_entry_ptr = next_entry.map_or(null(), WaitQueue::ref_to_ptr);
+                    let next_state = (state & !Self::ADDR_MASK) | next_entry_ptr as usize;
+                    match self
+                        .state
+                        .compare_exchange(state, next_state, AcqRel, Acquire)
+                    {
+                        Ok(_) => result = Ok(next_state),
+                        Err(new_state) => result = Err(new_state),
+                    }
+                }
+                if let Some(next_entry) = next_entry {
+                    next_entry.update_prev_entry_ptr(entry.prev_entry_ptr());
+                }
+                true
+            } else {
+                false
+            }
+        });
+        result
+    }
+
+    fn cleanup_async_context(entry: &WaitQueue, self_addr: usize) {
+        let this: &Self = unsafe { &*(self_addr as *const Self) };
+        let wait_queue_ptr: *const WaitQueue = addr_of!(*entry);
+        let wait_queue_addr = wait_queue_ptr as usize;
+
+        // Remove the wait queue entry from the wait queue list.
+        let mut state = this.state.load(Acquire);
+        if state & Self::ADDR_MASK != 0 {
+            while let Err(new_state) =
+                this.try_process_wait_queue(state, wait_queue_addr, Opcode::Cleanup)
+            {
+                if new_state & Self::WAIT_QUEUE_LOCKED == Self::WAIT_QUEUE_LOCKED {
+                    // Another thread is processing the wait queue.
+                    thread::yield_now();
+                    state = new_state;
+                    debug_assert_ne!(state & Self::ADDR_MASK, 0);
+                    continue;
+                }
+                // The wait queue is empty.
+                debug_assert_eq!(new_state & Self::ADDR_MASK, 0);
+                break;
+            }
+        }
+
+        // Release any acquired locks if the wait queue was processed.
+        if entry.async_poll_completed() {
+            if entry.desired_resources() == Self::EXCLUSIVE {
+                this.unlock_exclusive();
+            } else {
+                this.unlock_shared();
             }
         }
     }
