@@ -7,6 +7,7 @@ pub use lock::Lock;
 pub mod semaphore;
 pub use semaphore::Semaphore;
 
+mod sync_primitive;
 mod wait_queue;
 
 #[cfg(test)]

@@ -17,6 +17,8 @@ use std::sync::{Condvar, Mutex};
 use std::task::Waker;
 use std::task::{Context, Poll};
 
+use crate::sync_primitive::Opcode;
+
 /// Fair and heap-free wait queue for locking primitives in this crate.
 ///
 /// [`WaitQueue`] itself forms an intrusive linked list of entries where entries are pushed at the
@@ -37,8 +39,8 @@ pub(crate) struct WaitQueue {
     async_cleanup_fn: Option<AsyncContextCleaner>,
     /// Flag to indicate that this entry has completed polling and got the result.
     async_poll_completed: AtomicBool,
-    /// Desired resources to wait, expressed in `usize`.
-    desired_resource: usize,
+    /// Operation type.
+    opcode: Opcode,
 }
 
 /// Function to be invoked when [`WaitQueue`] is dropped before completion.
@@ -76,12 +78,21 @@ macro_rules! _miri_scope_protector {
 }
 
 impl WaitQueue {
+    /// The alignment of the [`WaitQueue`] in memory represented as a number of bits.
+    pub(crate) const ALIGNMENT_BITS: usize = 7;
+
+    /// Indicates that the wait queue is being processed by a thread.
+    pub(crate) const LOCKED_FLAG: usize = 1_usize << (Self::ALIGNMENT_BITS - 1);
+
+    /// Mark to extract additional information tagged with the [`WaitQueue`] memory address.
+    pub(crate) const DATA_MASK: usize = (1_usize << (Self::ALIGNMENT_BITS - 1)) - 1;
+
+    /// Mask to extract the memory address part from a `usize` value.
+    pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
+
     /// Creates a new [`WaitQueue`].
     #[cfg(feature = "loom")]
-    pub(crate) fn new(
-        desired_resources: usize,
-        async_cleanup_fn: Option<AsyncContextCleaner>,
-    ) -> Self {
+    pub(crate) fn new(opcode: Opcode, async_cleanup_fn: Option<AsyncContextCleaner>) -> Self {
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
@@ -89,16 +100,13 @@ impl WaitQueue {
             cond_var: Condvar::new(),
             async_cleanup_fn,
             async_poll_completed: AtomicBool::new(false),
-            desired_resource: desired_resources,
+            opcode,
         }
     }
 
     /// Creates a new [`WaitQueue`].
     #[cfg(not(feature = "loom"))]
-    pub(crate) const fn new(
-        desired_resources: usize,
-        async_cleanup_fn: Option<AsyncContextCleaner>,
-    ) -> Self {
+    pub(crate) const fn new(opcode: Opcode, async_cleanup_fn: Option<AsyncContextCleaner>) -> Self {
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
@@ -106,7 +114,7 @@ impl WaitQueue {
             cond_var: Condvar::new(),
             async_cleanup_fn,
             async_poll_completed: AtomicBool::new(false),
-            desired_resource: desired_resources,
+            opcode,
         }
     }
 
@@ -138,9 +146,9 @@ impl WaitQueue {
             .store(prev_entry_ptr.cast_mut(), Release);
     }
 
-    /// Returns its `usize` data that represents the desired resources.
-    pub(crate) const fn desired_resources(&self) -> usize {
-        self.desired_resource
+    /// Returns the operation code.
+    pub(crate) const fn opcode(&self) -> Opcode {
+        self.opcode
     }
 
     /// Converts a reference to `Self` to a raw pointer.
@@ -280,7 +288,7 @@ impl fmt::Debug for WaitQueue {
             .field("condition_variable", &self.cond_var)
             .field("has_async_cleanup_fn", &self.async_cleanup_fn.is_some())
             .field("async_poll_completed", &self.async_poll_completed)
-            .field("desired_resource", &self.desired_resource)
+            .field("desired_resource", &self.opcode)
             .finish()
     }
 }
