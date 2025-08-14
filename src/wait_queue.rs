@@ -5,6 +5,7 @@ use loom::sync::atomic::{AtomicBool, AtomicPtr};
 #[cfg(feature = "loom")]
 use loom::sync::{Condvar, Mutex};
 use std::cell::UnsafeCell;
+use std::fmt;
 use std::future::Future;
 use std::mem::align_of;
 use std::pin::Pin;
@@ -42,7 +43,6 @@ pub(crate) struct WaitQueue {
 type AsyncContextCleaner = (usize, fn(&WaitQueue, usize));
 
 /// Contextual data for asynchronous [`WaitQueue`].
-#[derive(Debug)]
 struct AsyncContext {
     /// Operation result.
     result: AtomicBool,
@@ -356,5 +356,18 @@ impl Future for WaitQueue {
         }
 
         Poll::Pending
+    }
+}
+
+impl fmt::Debug for AsyncContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AsyncContext")
+            .field("result", &self.result)
+            .field("ready", &self.ready)
+            .field("finalized", &self.finalized)
+            .field("waker_lock", &self.waker_lock)
+            .field("waker", &self.waker)
+            .field("cleaner_arg", &self.cleaner.0)
+            .finish()
     }
 }
