@@ -4,12 +4,12 @@
 use loom::sync::atomic::{AtomicBool, AtomicPtr};
 #[cfg(feature = "loom")]
 use loom::sync::{Condvar, Mutex};
-use std::fmt;
+use std::cell::UnsafeCell;
 use std::future::Future;
-use std::mem::{align_of, replace};
+use std::mem::align_of;
 use std::pin::Pin;
 use std::ptr::{addr_of, null_mut};
-use std::sync::atomic::Ordering::{Acquire, Release};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::{AtomicBool, AtomicPtr};
 #[cfg(not(feature = "loom"))]
@@ -30,17 +30,10 @@ pub(crate) struct WaitQueue {
     next_entry_ptr: AtomicPtr<Self>,
     /// Points to the entry that was pushed right after this entry.
     prev_entry_ptr: AtomicPtr<Self>,
-    /// The state of this entry.
-    state: Mutex<State>,
-    /// Conditional variable to send a signal to a blocking/synchronous waiter.
-    cond_var: Condvar,
-    /// Cleanup function to be called when this entry is dropped without waiting for completion in
-    /// an asynchronous context.
-    async_cleanup_fn: Option<AsyncContextCleaner>,
-    /// Flag to indicate that this entry has completed polling and got the result.
-    async_poll_completed: AtomicBool,
     /// Operation type.
     opcode: Opcode,
+    /// Monitors the result.
+    monitor: Monitor,
 }
 
 /// Function to be invoked when [`WaitQueue`] is dropped before completion.
@@ -48,18 +41,39 @@ pub(crate) struct WaitQueue {
 /// The first `usize` argument is passed to the function along with `self`.
 type AsyncContextCleaner = (usize, fn(&WaitQueue, usize));
 
-/// State of the wait queue.
+/// Contextual data for asynchronous [`WaitQueue`].
 #[derive(Debug)]
-enum State {
-    /// The [`WaitQueue`] has been created.
-    Initialized,
-    /// The [`WaitQueue`] is waiting for resources in a blocking/synchronous context.
-    Waiting,
-    /// The [`WaitQueue`] is polling until it gets resources or cancelled in an asynchronous
-    /// context.
-    Polling(Waker),
-    /// The result is ready.
-    ResultReady(bool),
+struct AsyncContext {
+    /// Operation result.
+    result: AtomicBool,
+    /// Result is set.
+    ready: AtomicBool,
+    /// The context will never be updated.
+    finalized: AtomicBool,
+    /// Lock to protect `waker`.
+    waker_lock: AtomicBool,
+    /// Waker to wake an executor when the result is ready.
+    waker: UnsafeCell<Option<Waker>>,
+    /// Context cleaner when [`WaitQueue`] is cancelled.
+    cleaner: AsyncContextCleaner,
+}
+
+/// Contextual data for synchronous [`WaitQueue`].
+#[derive(Debug, Default)]
+struct SyncContext {
+    /// The state of this entry.
+    state: Mutex<Option<bool>>,
+    /// Conditional variable to send a signal to a blocking/synchronous waiter.
+    cond_var: Condvar,
+}
+
+/// Monitors the result.
+#[derive(Debug)]
+enum Monitor {
+    /// Monitors asynchronously.
+    Async(AsyncContext),
+    /// Monitors synchronously.
+    Sync(SyncContext),
 }
 
 // `Miri` does not allow threads to keep `&self` when `Self` is dropped even `&self` is not used.
@@ -91,30 +105,24 @@ impl WaitQueue {
     pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
 
     /// Creates a new [`WaitQueue`].
-    #[cfg(feature = "loom")]
     pub(crate) fn new(opcode: Opcode, async_cleanup_fn: Option<AsyncContextCleaner>) -> Self {
+        let monitor = if let Some(async_cleanup_fn) = async_cleanup_fn {
+            Monitor::Async(AsyncContext {
+                result: AtomicBool::new(false),
+                ready: AtomicBool::new(false),
+                finalized: AtomicBool::new(false),
+                waker_lock: AtomicBool::new(false),
+                waker: UnsafeCell::new(None),
+                cleaner: async_cleanup_fn,
+            })
+        } else {
+            Monitor::Sync(SyncContext::default())
+        };
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
-            state: Mutex::new(State::Initialized),
-            cond_var: Condvar::new(),
-            async_cleanup_fn,
-            async_poll_completed: AtomicBool::new(false),
             opcode,
-        }
-    }
-
-    /// Creates a new [`WaitQueue`].
-    #[cfg(not(feature = "loom"))]
-    pub(crate) const fn new(opcode: Opcode, async_cleanup_fn: Option<AsyncContextCleaner>) -> Self {
-        Self {
-            next_entry_ptr: AtomicPtr::new(null_mut()),
-            prev_entry_ptr: AtomicPtr::new(null_mut()),
-            state: Mutex::new(State::Initialized),
-            cond_var: Condvar::new(),
-            async_cleanup_fn,
-            async_poll_completed: AtomicBool::new(false),
-            opcode,
+            monitor,
         }
     }
 
@@ -227,45 +235,53 @@ impl WaitQueue {
 
     /// Sets the result to the entry.
     pub(crate) fn set_result(&self, result: bool) {
-        let _miri_scope_protector = _miri_scope_protector!();
-        if let Ok(mut state) = self.state.lock() {
-            match replace::<State>(&mut *state, State::ResultReady(result)) {
-                State::Waiting => {
-                    self.cond_var.notify_one();
+        match &self.monitor {
+            Monitor::Async(async_context) => {
+                debug_assert!(!async_context.finalized.load(Relaxed));
+                async_context.result.store(result, Release);
+                async_context.ready.store(true, Release);
+                if async_context
+                    .waker_lock
+                    .compare_exchange(false, true, AcqRel, Relaxed)
+                    .is_ok()
+                {
+                    async_context.waker_lock.store(false, Release);
                 }
-                State::Polling(waker) => {
-                    waker.wake();
+                unsafe {
+                    if let Some(waker) = (*async_context.waker.get()).take() {
+                        waker.wake();
+                    }
                 }
-                State::ResultReady(_) | State::Initialized => (),
+                async_context.finalized.store(true, Release);
+            }
+            Monitor::Sync(sync_context) => {
+                if let Ok(mut state) = sync_context.state.lock() {
+                    *state = Some(result);
+                    sync_context.cond_var.notify_one();
+                }
             }
         }
     }
 
     /// Polls the result, synchronously.
     pub(crate) fn poll_result(&self) -> bool {
-        while let Ok(mut state) = self.state.lock() {
-            match &*state {
-                State::Initialized => {
-                    *state = State::Waiting;
-                }
-                State::Waiting | State::Polling(_) => (),
-                State::ResultReady(result) => {
-                    let _miri_scope_protector = _miri_scope_protector!();
-                    return *result;
-                }
-            }
+        let Monitor::Sync(sync_context) = &self.monitor else {
+            debug_assert!(false, "Logic error");
+            return false;
+        };
 
-            // `loom` does not implement `wait_while`, so use a loop instead.
-            while !matches!(*state, State::ResultReady(_)) {
-                if let Ok(returned) = self.cond_var.wait(state) {
+        while let Ok(mut state) = sync_context.state.lock() {
+            while state.is_none() {
+                if let Ok(returned) = sync_context.cond_var.wait(state) {
                     state = returned;
                 } else {
                     debug_assert!(false, "The mutex can never be poisoned");
                     return false;
                 }
             }
-            if let State::ResultReady(result) = &*state {
-                return *result;
+            if let Some(result) = state.take() {
+                let _miri_scope_protector = _miri_scope_protector!();
+                return result;
             }
         }
 
@@ -275,31 +291,21 @@ impl WaitQueue {
 
     /// Returns `true` if asynchronous polling was successfully completed.
     pub(crate) fn async_poll_completed(&self) -> bool {
-        self.async_poll_completed.load(Acquire)
-    }
-}
-
-impl fmt::Debug for WaitQueue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WaitQueue")
-            .field("forward_link", &self.next_entry_ptr)
-            .field("backward_link", &self.prev_entry_ptr)
-            .field("state", &self.state)
-            .field("condition_variable", &self.cond_var)
-            .field("has_async_cleanup_fn", &self.async_cleanup_fn.is_some())
-            .field("async_poll_completed", &self.async_poll_completed)
-            .field("desired_resource", &self.opcode)
-            .finish()
+        let Monitor::Async(async_context) = &self.monitor else {
+            return false;
+        };
+        async_context.finalized.load(Acquire)
     }
 }
 
 impl Drop for WaitQueue {
     #[inline]
     fn drop(&mut self) {
-        if let Some((arg, cleanup_fn)) = self.async_cleanup_fn.as_ref() {
-            if !self.async_poll_completed.load(Acquire) {
-                cleanup_fn(self, *arg);
-            }
+        let Monitor::Async(async_context) = &self.monitor else {
+            return;
+        };
+        if !async_context.finalized.load(Relaxed) {
+            async_context.cleaner.1(self, async_context.cleaner.0);
         }
     }
 }
@@ -307,25 +313,43 @@ impl Drop for WaitQueue {
 impl Future for WaitQueue {
     type Output = bool;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let waker = cx.waker().clone();
-        if let Ok(mut state) = self.state.lock() {
-            match &mut *state {
-                State::Waiting => (),
-                State::Polling(_) | State::Initialized => {
-                    *state = State::Polling(waker);
-                }
-                State::ResultReady(result) => {
-                    self.async_poll_completed.store(true, Release);
-                    let _miri_scope_protector = _miri_scope_protector!();
-                    return Poll::Ready(*result);
-                }
-            }
-            Poll::Pending
-        } else {
-            // Failing to lock means that the mutex is poisoned.
-            debug_assert!(false, "The mutex can never be poisoned");
-            Poll::Ready(false)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let Monitor::Async(async_context) = &mut self.monitor else {
+            debug_assert!(false, "Logic error");
+            let _miri_scope_protector = _miri_scope_protector!();
+            return Poll::Ready(false);
+        };
+        if async_context.finalized.load(Acquire) {
+            debug_assert!(async_context.ready.load(Relaxed));
+            let _miri_scope_protector = _miri_scope_protector!();
+            return Poll::Ready(async_context.result.load(Relaxed));
         }
+
+        let waker = cx.waker().clone();
+        if async_context.ready.load(Relaxed) {
+            // No need to install the waker.
+            waker.wake();
+            if async_context.finalized.load(Acquire) {
+                let _miri_scope_protector = _miri_scope_protector!();
+                return Poll::Ready(async_context.result.load(Relaxed));
+            }
+        } else if async_context
+            .waker_lock
+            .compare_exchange(false, true, AcqRel, Relaxed)
+            .is_ok()
+        {
+            *async_context.waker.get_mut() = Some(waker);
+            async_context.waker_lock.store(false, Release);
+        } else {
+            // Failing to lock means that the result is ready.
+            debug_assert!(async_context.ready.load(Relaxed));
+            waker.wake();
+            if async_context.finalized.load(Acquire) {
+                let _miri_scope_protector = _miri_scope_protector!();
+                return Poll::Ready(async_context.result.load(Relaxed));
+            }
+        }
+
+        Poll::Pending
     }
 }

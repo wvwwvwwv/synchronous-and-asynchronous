@@ -7,7 +7,7 @@ mod lock_model {
     use std::sync::Arc;
 
     #[test]
-    fn lock_share() {
+    fn lock_shared() {
         loom::model(|| {
             let lock = Arc::new(Lock::default());
             lock.lock_exclusive_sync();
