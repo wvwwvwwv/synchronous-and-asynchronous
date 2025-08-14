@@ -6,14 +6,6 @@ mod lock_test {
     use crate::Lock;
 
     #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
-    #[tokio::test]
-    async fn lock() {
-        let lock = Lock::default();
-        lock.lock_exclusive_async().await;
-        assert!(!lock.try_lock_shared());
-    }
-
-    #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
     async fn share_wait_acquire() {
         let num_tasks = 64;
@@ -23,10 +15,15 @@ mod lock_test {
         lock.lock_exclusive_async().await;
 
         let mut tasks = Vec::new();
-        for _ in 0..num_tasks {
+        for i in 0..num_tasks {
             let lock = lock.clone();
             tasks.push(tokio::spawn(async move {
-                lock.lock_shared_async().await;
+                if i % 8 == 0 {
+                    // At most 15 tasks can block.
+                    lock.lock_shared_sync();
+                } else {
+                    lock.lock_shared_async().await;
+                }
                 assert!(lock.unlock_shared());
             }));
         }

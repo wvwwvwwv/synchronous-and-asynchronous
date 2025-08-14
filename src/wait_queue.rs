@@ -326,7 +326,7 @@ impl Future for WaitQueue {
         }
 
         let waker = cx.waker().clone();
-        if async_context.ready.load(Relaxed) {
+        if async_context.ready.load(Acquire) {
             // No need to install the waker.
             waker.wake();
             if async_context.finalized.load(Acquire) {
@@ -335,10 +335,15 @@ impl Future for WaitQueue {
             }
         } else if async_context
             .waker_lock
-            .compare_exchange(false, true, AcqRel, Relaxed)
+            .compare_exchange(false, true, AcqRel, Acquire)
             .is_ok()
         {
-            *async_context.waker.get_mut() = Some(waker);
+            if async_context.ready.load(Acquire) {
+                // The result has been ready in the meantime.
+                waker.wake();
+            } else {
+                *async_context.waker.get_mut() = Some(waker);
+            }
             async_context.waker_lock.store(false, Release);
         } else {
             // Failing to lock means that the result is ready.
