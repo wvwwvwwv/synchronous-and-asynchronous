@@ -18,7 +18,6 @@ pub(crate) enum Opcode {
     /// Acquires shared ownership.
     Shared,
     /// Acquires semaphores.
-    #[allow(dead_code)]
     Semaphore(u8),
     /// Cleanup stale wait queue entries.
     Cleanup,
