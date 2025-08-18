@@ -1,8 +1,11 @@
 #[cfg(not(feature = "loom"))]
 #[cfg(test)]
-mod lock_test {
-    use std::{sync::Arc, time::Duration};
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
 
+    use crate::sync_primitive::Opcode;
+    use crate::sync_primitive::SyncPrimitive;
     use crate::Lock;
 
     #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
@@ -59,8 +62,8 @@ mod lock_test {
             }));
         }
 
-        lock.test_drop_wait_queue_entry(true);
-        lock.test_drop_wait_queue_entry(false);
+        lock.test_drop_wait_queue_entry(Opcode::Exclusive);
+        lock.test_drop_wait_queue_entry(Opcode::Shared);
         assert!(lock.unlock_exclusive());
 
         for task in tasks {

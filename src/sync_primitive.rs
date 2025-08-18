@@ -50,6 +50,32 @@ pub(crate) trait SyncPrimitive: Sized {
             .is_ok()
     }
 
+    /// Waits for the desired resources asynchronously.
+    async fn wait_resources_async(&self, state: usize, mode: Opcode) -> bool {
+        debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
+        let mut async_wait = WaitQueue::new(
+            mode,
+            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
+        );
+        let mut async_wait_pinned = Pin::new(&mut async_wait);
+        if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
+            async_wait_pinned.set_result(false);
+        }
+        async_wait_pinned.await
+    }
+
+    /// Waits for the desired resources synchronously.
+    #[must_use]
+    fn wait_resources_sync(&self, state: usize, mode: Opcode) -> bool {
+        debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
+        let mut sync_wait = WaitQueue::new(mode, None);
+        let mut sync_wait_pinned = Pin::new(&mut sync_wait);
+        if !self.try_push_wait_queue_entry(&mut sync_wait_pinned, state) {
+            sync_wait_pinned.set_result(false);
+        }
+        sync_wait_pinned.poll_result()
+    }
+
     /// Releases resources represented by the supplied operation mode.
     ///
     /// Returns `false` if the resource cannot be released.
@@ -293,6 +319,20 @@ pub(crate) trait SyncPrimitive: Sized {
         // Release any acquired locks if the wait queue was processed.
         if entry.async_poll_completed() {
             this.release_loop(state, entry.opcode());
+        }
+    }
+
+    /// Tests whether dropping a wait queue entry without waiting for its completion is safe.
+    #[cfg(test)]
+    fn test_drop_wait_queue_entry(&self, mode: Opcode) {
+        let state = self.state().load(Acquire);
+        let mut async_wait = WaitQueue::new(
+            mode,
+            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
+        );
+        let mut async_wait_pinned = std::pin::Pin::new(&mut async_wait);
+        if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
+            async_wait_pinned.set_result(false);
         }
     }
 }

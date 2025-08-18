@@ -85,6 +85,60 @@ impl Semaphore {
         Self::MAX_PERMITS - (self.state.load(mo) & WaitQueue::DATA_MASK)
     }
 
+    /// Gets a permit from the semaphore asynchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// async {
+    ///     semaphore.acquire_async().await;
+    ///     assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    /// };
+    /// ```
+    #[inline]
+    pub async fn acquire_async(&self) {
+        loop {
+            let (result, state) = self.try_acquire_internal(1);
+            if result {
+                return;
+            }
+            if self.wait_resources_async(state, Opcode::Semaphore(1)).await {
+                return;
+            }
+        }
+    }
+
+    /// Gets a permit from the semaphore synchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// semaphore.acquire_sync();
+    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    /// ```
+    #[inline]
+    pub fn acquire_sync(&self) {
+        loop {
+            let (result, state) = self.try_acquire_internal(1);
+            if result {
+                return;
+            }
+            if self.wait_resources_sync(state, Opcode::Semaphore(1)) {
+                return;
+            }
+        }
+    }
+
     /// Tries to get a permit from the semaphore.
     ///
     /// Returns `false` if no permits are available.
@@ -104,6 +158,67 @@ impl Semaphore {
         self.try_acquire_internal(1).0
     }
 
+    /// Gets multiple permits from the semaphore asynchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// async {
+    ///     semaphore.acquire_many_async(11).await;
+    ///     assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 11);
+    /// };
+    /// ```
+    #[inline]
+    pub async fn acquire_many_async(&self, count: usize) {
+        loop {
+            let (result, state) = self.try_acquire_internal(count);
+            if result {
+                return;
+            }
+            // The value is checked in `try_acquire_internal`.
+            #[allow(clippy::cast_possible_truncation)]
+            if self
+                .wait_resources_async(state, Opcode::Semaphore(count as u8))
+                .await
+            {
+                return;
+            }
+        }
+    }
+
+    /// Gets multiple permits from the semaphore synchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// semaphore.acquire_many_sync(11);
+    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 11);
+    /// ```
+    #[inline]
+    pub fn acquire_many_sync(&self, count: usize) {
+        loop {
+            let (result, state) = self.try_acquire_internal(count);
+            if result {
+                return;
+            }
+            // The value is checked in `try_acquire_internal`.
+            #[allow(clippy::cast_possible_truncation)]
+            if self.wait_resources_sync(state, Opcode::Semaphore(count as u8)) {
+                return;
+            }
+        }
+    }
+
     /// Tries to get multiple permits from the semaphore.
     ///
     /// Returns `false` if no permits are available.
@@ -121,6 +236,32 @@ impl Semaphore {
     #[inline]
     pub fn try_acquire_many(&self, count: usize) -> bool {
         self.try_acquire_internal(count).0
+    }
+
+    /// Releases a permit.
+    ///
+    /// Returns `true` if a permit was successfully released.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// assert!(semaphore.try_acquire_many(11));
+    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 11);
+    ///
+    /// assert!(semaphore.release());
+    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 10);
+    /// ```
+    #[inline]
+    pub fn release(&self) -> bool {
+        match self.state.compare_exchange(1, 0, Acquire, Relaxed) {
+            Ok(_) => true,
+            Err(state) => self.release_loop(state, Opcode::Semaphore(1)),
+        }
     }
 
     /// Releases permits.

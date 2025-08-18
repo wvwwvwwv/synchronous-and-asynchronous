@@ -5,7 +5,6 @@ use crate::wait_queue::WaitQueue;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
 use std::fmt;
-use std::pin::Pin;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
@@ -110,7 +109,7 @@ impl Lock {
             if result {
                 return;
             }
-            if self.wait_exclusive_lock_async(state).await {
+            if self.wait_resources_async(state, Opcode::Exclusive).await {
                 return;
             }
         }
@@ -138,7 +137,7 @@ impl Lock {
             if result {
                 return;
             }
-            if self.wait_exclusive_lock_sync(state) {
+            if self.wait_resources_sync(state, Opcode::Exclusive) {
                 return;
             }
         }
@@ -187,7 +186,7 @@ impl Lock {
             if result {
                 return;
             }
-            if self.wait_shared_lock_async(state).await {
+            if self.wait_resources_async(state, Opcode::Shared).await {
                 return;
             }
         }
@@ -215,7 +214,7 @@ impl Lock {
             if result {
                 return;
             }
-            if self.wait_shared_lock_sync(state) {
+            if self.wait_resources_sync(state, Opcode::Shared) {
                 return;
             }
         }
@@ -302,57 +301,6 @@ impl Lock {
         }
     }
 
-    /// Tests whether dropping a wait queue entry without waiting for its completion is safe.
-    #[cfg(test)]
-    pub fn test_drop_wait_queue_entry(&self, exclusive: bool) {
-        let (result, state) = if exclusive {
-            self.try_lock_exclusive_internal()
-        } else {
-            self.try_lock_shared_internal()
-        };
-        if result {
-            return;
-        }
-        let mut async_wait = WaitQueue::new(
-            if exclusive {
-                Opcode::Exclusive
-            } else {
-                Opcode::Shared
-            },
-            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
-        );
-        let mut async_wait_pinned = Pin::new(&mut async_wait);
-        if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
-            async_wait_pinned.set_result(false);
-        }
-    }
-
-    /// Waits for an exclusive lock asynchronously.
-    async fn wait_exclusive_lock_async(&self, state: usize) -> bool {
-        debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-        let mut async_wait = WaitQueue::new(
-            Opcode::Exclusive,
-            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
-        );
-        let mut async_wait_pinned = Pin::new(&mut async_wait);
-        if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
-            async_wait_pinned.set_result(false);
-        }
-        async_wait_pinned.await
-    }
-
-    /// Waits for an exclusive lock synchronously.
-    #[must_use]
-    fn wait_exclusive_lock_sync(&self, state: usize) -> bool {
-        debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-        let mut sync_wait = WaitQueue::new(Opcode::Exclusive, None);
-        let mut sync_wait_pinned = Pin::new(&mut sync_wait);
-        if !self.try_push_wait_queue_entry(&mut sync_wait_pinned, state) {
-            sync_wait_pinned.set_result(false);
-        }
-        sync_wait_pinned.poll_result()
-    }
-
     /// Tries to acquire an exclusive lock.
     fn try_lock_exclusive_internal(&self) -> (bool, usize) {
         let Err(mut state) = self
@@ -380,38 +328,6 @@ impl Lock {
                 }
             }
         }
-    }
-
-    /// Waits for a shared lock to be available asynchronously.
-    async fn wait_shared_lock_async(&self, state: usize) -> bool {
-        debug_assert!(
-            state & WaitQueue::ADDR_MASK != 0
-                || state & WaitQueue::DATA_MASK >= Self::MAX_SHARED_OWNERS
-        );
-        let mut async_wait = WaitQueue::new(
-            Opcode::Shared,
-            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
-        );
-        let mut async_wait_pinned = Pin::new(&mut async_wait);
-        if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
-            async_wait_pinned.set_result(false);
-        }
-        async_wait_pinned.await
-    }
-
-    /// Waits for a shared lock to be available synchronously.
-    #[must_use]
-    fn wait_shared_lock_sync(&self, state: usize) -> bool {
-        debug_assert!(
-            state & WaitQueue::ADDR_MASK != 0
-                || state & WaitQueue::DATA_MASK >= Self::MAX_SHARED_OWNERS
-        );
-        let mut sync_wait = WaitQueue::new(Opcode::Shared, None);
-        let mut sync_wait_pinned = Pin::new(&mut sync_wait);
-        if !self.try_push_wait_queue_entry(&mut sync_wait_pinned, state) {
-            sync_wait_pinned.set_result(false);
-        }
-        sync_wait_pinned.poll_result()
     }
 
     /// Tries to acquire a shared lock.
