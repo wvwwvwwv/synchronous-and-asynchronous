@@ -1,6 +1,8 @@
 //! [`Semaphore`] is a synchronization primitive that allows a fixed number of threads to access a
 //! resource concurrently.
 
+#![deny(unsafe_code)]
+
 use crate::sync_primitive::{Opcode, SyncPrimitive};
 use crate::wait_queue::WaitQueue;
 #[cfg(feature = "loom")]

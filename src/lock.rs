@@ -1,5 +1,7 @@
 //! [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 
+#![deny(unsafe_code)]
+
 use crate::sync_primitive::{Opcode, SyncPrimitive};
 use crate::wait_queue::WaitQueue;
 #[cfg(feature = "loom")]

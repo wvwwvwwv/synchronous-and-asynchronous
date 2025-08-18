@@ -5,7 +5,7 @@ documentation = "https://docs.rs/saa"
 version = "0.0.3"
 authors = ["wvwwvwwv <wvwwvwwv@me.com>"]
 edition = "2021"
-rust-version = "1.65.0"
+rust-version = "1.75.0"
 readme = "README.md"
 repository = "https://github.com/wvwwvwwv/synchronous-and-asynchronous/"
 license = "Apache-2.0"
@@ -28,4 +28,8 @@ tokio = { version = "1.47", features = ["full"] }
 
 [[bench]]
 name = "lock"
+harness = false
+
+[[bench]]
+name = "semaphore"
 harness = false
