@@ -1,7 +1,5 @@
 //! Wait queue implementation.
 
-#[cfg(feature = "loom")]
-use loom::sync::{Condvar, Mutex};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::future::Future;
@@ -13,11 +11,12 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicPtr};
 #[cfg(not(feature = "loom"))]
 use std::sync::{Condvar, Mutex};
-use std::task::Waker;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicBool, AtomicPtr};
+#[cfg(feature = "loom")]
+use loom::sync::{Condvar, Mutex};
 
 use crate::Opcode;
 
