@@ -7,7 +7,7 @@ use std::fmt;
 use std::future::Future;
 use std::mem::align_of;
 use std::pin::Pin;
-use std::ptr::{addr_of, null_mut, with_exposed_provenance};
+use std::ptr::{from_ref, null_mut, with_exposed_provenance};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::{AtomicBool, AtomicPtr};
@@ -162,7 +162,7 @@ impl WaitQueue {
 
     /// Converts a reference to `Self` to a raw pointer.
     pub(crate) fn ref_to_ptr(this: &Self) -> *const Self {
-        let wait_queue_ptr: *const Self = addr_of!(*this);
+        let wait_queue_ptr: *const Self = from_ref(this);
         debug_assert_eq!(wait_queue_ptr as usize % align_of::<Self>(), 0);
         wait_queue_ptr
     }

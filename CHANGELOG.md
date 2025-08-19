@@ -1,5 +1,5 @@
 # Changelog
 
-0.0.x
+0.1.0
 
 * Initial release.

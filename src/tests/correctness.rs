@@ -35,6 +35,8 @@ mod tests {
                 assert_ne!(check.fetch_add(1, Relaxed), usize::MAX);
                 check.fetch_sub(1, Relaxed);
                 assert!(lock.unlock_shared());
+                lock.lock_shared_async().await;
+                assert!(lock.unlock_shared());
             }));
         }
 
@@ -116,11 +118,15 @@ mod tests {
                     assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
                     check.fetch_sub(usize::MAX, Relaxed);
                     assert!(lock.unlock_exclusive());
+                    lock.lock_exclusive_sync();
+                    assert!(lock.unlock_exclusive());
                 } else {
                     lock.lock_shared_sync();
                     check.fetch_add(1, Relaxed);
                     thread::sleep(Duration::from_millis(1));
                     check.fetch_sub(1, Relaxed);
+                    assert!(lock.unlock_shared());
+                    lock.lock_shared_sync();
                     assert!(lock.unlock_shared());
                 }
             }));
