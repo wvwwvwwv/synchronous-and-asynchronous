@@ -1,15 +1,13 @@
 //! Wait queue implementation.
 
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicBool, AtomicPtr};
-#[cfg(feature = "loom")]
 use loom::sync::{Condvar, Mutex};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::future::Future;
 use std::mem::align_of;
 use std::pin::Pin;
-use std::ptr::{addr_of, null_mut};
+use std::ptr::{addr_of, null_mut, with_exposed_provenance};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::{AtomicBool, AtomicPtr};
@@ -18,7 +16,10 @@ use std::sync::{Condvar, Mutex};
 use std::task::Waker;
 use std::task::{Context, Poll};
 
-use crate::sync_primitive::Opcode;
+#[cfg(feature = "loom")]
+use loom::sync::atomic::{AtomicBool, AtomicPtr};
+
+use crate::Opcode;
 
 /// Fair and heap-free wait queue for locking primitives in this crate.
 ///
@@ -169,7 +170,7 @@ impl WaitQueue {
     /// Converts the memory address of `Self` to a raw pointer.
     pub(crate) fn addr_to_ptr(wait_queue_addr: usize) -> *const Self {
         debug_assert_eq!(wait_queue_addr % align_of::<Self>(), 0);
-        wait_queue_addr as *const Self
+        with_exposed_provenance(wait_queue_addr)
     }
 
     /// Installs a pointer to the previous entry on each entry by forward-iterating over entries.

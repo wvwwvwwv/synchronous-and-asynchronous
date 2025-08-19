@@ -1,27 +1,17 @@
 //! Define base operations for synchronization primitives.
 
-use crate::wait_queue::WaitQueue;
-#[cfg(feature = "loom")]
-use loom::sync::atomic::AtomicUsize;
 use std::pin::Pin;
-use std::ptr::{addr_of, null};
+use std::ptr::{addr_of, null, with_exposed_provenance};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::thread;
 
-/// Operation types.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum Opcode {
-    /// Acquires exclusive ownership.
-    Exclusive,
-    /// Acquires shared ownership.
-    Shared,
-    /// Acquires semaphores.
-    Semaphore(u8),
-    /// Cleanup stale wait queue entries.
-    Cleanup,
-}
+#[cfg(feature = "loom")]
+use loom::sync::atomic::AtomicUsize;
+
+use crate::Opcode;
+use crate::wait_queue::WaitQueue;
 
 /// Define base operations for synchronization primitives.
 pub(crate) trait SyncPrimitive: Sized {
@@ -34,13 +24,13 @@ pub(crate) trait SyncPrimitive: Sized {
     /// Converts a reference to `Self` into a memory address.
     fn self_addr(&self) -> usize {
         let self_ptr: *const Self = addr_of!(*self);
-        self_ptr as usize
+        self_ptr.expose_provenance()
     }
 
     /// Tries to push a wait queue entry into the wait queue.
     #[must_use]
     fn try_push_wait_queue_entry(&self, entry: &mut Pin<&mut WaitQueue>, state: usize) -> bool {
-        let entry_addr = WaitQueue::ref_to_ptr(entry) as usize;
+        let entry_addr = WaitQueue::ref_to_ptr(entry).expose_provenance();
         debug_assert_eq!(entry_addr & (!WaitQueue::ADDR_MASK), 0);
 
         entry.update_next_entry_ptr(WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK));
@@ -293,9 +283,9 @@ pub(crate) trait SyncPrimitive: Sized {
     /// Cleans up a [`WaitQueue`] entry that was pushed into the wait queue, but has not been
     /// processed.
     fn cleanup_wait_queue_entry(entry: &WaitQueue, self_addr: usize) {
-        let this: &Self = unsafe { &*(self_addr as *const Self) };
+        let this: &Self = unsafe { &*with_exposed_provenance(self_addr) };
         let wait_queue_ptr: *const WaitQueue = addr_of!(*entry);
-        let wait_queue_addr = wait_queue_ptr as usize;
+        let wait_queue_addr = wait_queue_ptr.expose_provenance();
 
         // Remove the wait queue entry from the wait queue list.
         let mut state = this.state().load(Acquire);

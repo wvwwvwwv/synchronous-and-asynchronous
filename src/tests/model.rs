@@ -1,11 +1,11 @@
 #[cfg(feature = "loom")]
 #[cfg(test)]
 mod lock_model {
-    use crate::Lock;
-    use crate::Semaphore;
+    use std::sync::Arc;
 
     use loom::thread::spawn;
-    use std::sync::Arc;
+
+    use crate::{Lock, Semaphore};
 
     #[test]
     fn lock_shared() {

@@ -4,6 +4,9 @@
 pub mod lock;
 pub use lock::Lock;
 
+pub mod opcode;
+pub use opcode::Opcode;
+
 pub mod semaphore;
 pub use semaphore::Semaphore;
 

@@ -2,14 +2,17 @@
 
 #![deny(unsafe_code)]
 
-use crate::sync_primitive::{Opcode, SyncPrimitive};
-use crate::wait_queue::WaitQueue;
-#[cfg(feature = "loom")]
-use loom::sync::atomic::AtomicUsize;
 use std::fmt;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
+
+#[cfg(feature = "loom")]
+use loom::sync::atomic::AtomicUsize;
+
+use crate::Opcode;
+use crate::sync_primitive::SyncPrimitive;
+use crate::wait_queue::WaitQueue;
 
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 ///
@@ -18,7 +21,7 @@ use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
 /// acquired locks and resources to protect.
 #[derive(Default)]
 pub struct Lock {
-    // State of the [`Lock`].
+    /// State of the [`Lock`].
     state: AtomicUsize,
 }
 
