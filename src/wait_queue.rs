@@ -92,14 +92,11 @@ macro_rules! _miri_scope_protector {
 }
 
 impl WaitQueue {
-    /// The alignment of the [`WaitQueue`] in memory represented as a number of bits.
-    pub(crate) const ALIGNMENT_BITS: usize = 7;
-
     /// Indicates that the wait queue is being processed by a thread.
-    pub(crate) const LOCKED_FLAG: usize = 1_usize << (Self::ALIGNMENT_BITS - 1);
+    pub(crate) const LOCKED_FLAG: usize = align_of::<Self>() >> 1;
 
     /// Mark to extract additional information tagged with the [`WaitQueue`] memory address.
-    pub(crate) const DATA_MASK: usize = (1_usize << (Self::ALIGNMENT_BITS - 1)) - 1;
+    pub(crate) const DATA_MASK: usize = (align_of::<Self>() >> 1) - 1;
 
     /// Mask to extract the memory address part from a `usize` value.
     pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
@@ -195,7 +192,7 @@ impl WaitQueue {
     pub(crate) fn any_forward<F: FnMut(&Self, Option<&Self>) -> bool>(
         tail_entry_ptr: *const Self,
         mut f: F,
-    ) -> bool {
+    ) {
         let mut entry_ptr = tail_entry_ptr;
         while !entry_ptr.is_null() {
             entry_ptr = unsafe {
@@ -204,14 +201,14 @@ impl WaitQueue {
                     next_entry.update_prev_entry_ptr(entry_ptr);
                 }
 
+                // The result is set here, so the scope should be protected.
                 let _miri_scope_protector = _miri_scope_protector!();
                 if f(&*entry_ptr, next_entry_ptr.as_ref()) {
-                    return true;
+                    return;
                 }
                 next_entry_ptr
             };
         }
-        false
     }
 
     /// Backward-iterates over entries, and returns `true` when the supplied closure returns `true`.
@@ -223,7 +220,6 @@ impl WaitQueue {
         while !entry_ptr.is_null() {
             entry_ptr = unsafe {
                 let prev_entry_ptr = (*entry_ptr).prev_entry_ptr();
-                let _miri_scope_protector = _miri_scope_protector!();
                 if f(&*entry_ptr, prev_entry_ptr.as_ref()) {
                     return true;
                 }
@@ -280,6 +276,7 @@ impl WaitQueue {
                 }
             }
             if let Some(result) = state.take() {
+                drop(state);
                 let _miri_scope_protector = _miri_scope_protector!();
                 return result;
             }

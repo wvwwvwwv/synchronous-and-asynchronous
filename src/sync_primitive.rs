@@ -133,28 +133,18 @@ pub(crate) trait SyncPrimitive: Sized {
     fn try_process_wait_queue(
         &self,
         mut state: usize,
-        mut entry_addr_to_remove: usize,
+        entry_addr_to_remove: usize,
         mode: Opcode,
     ) -> Result<(), usize> {
         state = self.try_start_process_wait_queue(state, mode)?;
 
-        // This is the only thread processing the wait queue.
+        if entry_addr_to_remove != 0 {
+            state = self.remove_wait_queue_entry(state, entry_addr_to_remove);
+        }
+
         let mut head_entry_ptr: *const WaitQueue = null();
         loop {
             debug_assert_eq!(state & WaitQueue::LOCKED_FLAG, WaitQueue::LOCKED_FLAG);
-
-            if entry_addr_to_remove != 0 {
-                state = match self.remove_wait_queue_entry(state, entry_addr_to_remove) {
-                    Ok(new_state) => {
-                        entry_addr_to_remove = 0;
-                        new_state
-                    }
-                    Err(new_state) => {
-                        state = new_state;
-                        continue;
-                    }
-                };
-            }
 
             let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
             if head_entry_ptr.is_null() {
@@ -243,41 +233,44 @@ pub(crate) trait SyncPrimitive: Sized {
     }
 
     /// Removes a wait queue entry from the wait queue.
-    fn remove_wait_queue_entry(
-        &self,
-        state: usize,
-        entry_addr_to_remove: usize,
-    ) -> Result<usize, usize> {
-        debug_assert_eq!(state & WaitQueue::LOCKED_FLAG, WaitQueue::LOCKED_FLAG);
-        debug_assert_ne!(state & WaitQueue::ADDR_MASK, 0);
+    fn remove_wait_queue_entry(&self, mut state: usize, entry_addr_to_remove: usize) -> usize {
+        loop {
+            debug_assert_eq!(state & WaitQueue::LOCKED_FLAG, WaitQueue::LOCKED_FLAG);
+            debug_assert_ne!(state & WaitQueue::ADDR_MASK, 0);
 
-        let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
-        let target_ptr = WaitQueue::addr_to_ptr(entry_addr_to_remove);
-        let mut result = Ok(state);
-        WaitQueue::any_forward(tail_entry_ptr, |entry, next_entry| {
-            if WaitQueue::ref_to_ptr(entry) == target_ptr {
-                if let Some(prev_entry) = unsafe { entry.prev_entry_ptr().as_ref() } {
-                    prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
-                } else {
-                    let next_entry_ptr = next_entry.map_or(null(), WaitQueue::ref_to_ptr);
-                    let next_state = (state & !WaitQueue::ADDR_MASK) | next_entry_ptr as usize;
-                    match self
-                        .state()
-                        .compare_exchange(state, next_state, AcqRel, Acquire)
-                    {
-                        Ok(_) => result = Ok(next_state),
-                        Err(new_state) => result = Err(new_state),
+            let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
+            let target_ptr = WaitQueue::addr_to_ptr(entry_addr_to_remove);
+            let mut result = Ok(state);
+            WaitQueue::any_forward(tail_entry_ptr, |entry, next_entry| {
+                if WaitQueue::ref_to_ptr(entry) == target_ptr {
+                    if let Some(next_entry) = next_entry {
+                        next_entry.update_prev_entry_ptr(entry.prev_entry_ptr());
                     }
+                    if let Some(prev_entry) = unsafe { entry.prev_entry_ptr().as_ref() } {
+                        prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
+                    } else {
+                        let next_entry_ptr = next_entry.map_or(null(), WaitQueue::ref_to_ptr);
+                        let next_state =
+                            (state & !WaitQueue::ADDR_MASK) | next_entry_ptr.expose_provenance();
+                        match self
+                            .state()
+                            .compare_exchange(state, next_state, AcqRel, Acquire)
+                        {
+                            Ok(_) => result = Ok(next_state),
+                            Err(new_state) => result = Err(new_state),
+                        }
+                    }
+                    true
+                } else {
+                    false
                 }
-                if let Some(next_entry) = next_entry {
-                    next_entry.update_prev_entry_ptr(entry.prev_entry_ptr());
-                }
-                true
-            } else {
-                false
+            });
+
+            match result {
+                Ok(state) => return state,
+                Err(new_state) => state = new_state,
             }
-        });
-        result
+        }
     }
 
     /// Cleans up a [`WaitQueue`] entry that was pushed into the wait queue, but has not been
