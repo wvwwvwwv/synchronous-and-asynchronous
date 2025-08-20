@@ -4,8 +4,9 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::thread;
 use std::time::Duration;
 
+use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
-use crate::{Lock, Opcode, Semaphore};
+use crate::{Lock, Semaphore};
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]

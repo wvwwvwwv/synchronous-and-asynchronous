@@ -18,7 +18,7 @@ use loom::sync::atomic::{AtomicBool, AtomicPtr};
 #[cfg(feature = "loom")]
 use loom::sync::{Condvar, Mutex};
 
-use crate::Opcode;
+use crate::opcode::Opcode;
 
 /// Fair and heap-free wait queue for locking primitives in this crate.
 ///

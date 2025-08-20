@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use loom::thread::spawn;
 
+use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
-use crate::{Lock, Opcode, Semaphore};
+use crate::{Lock, Semaphore};
 
 #[test]
 fn lock_shared() {

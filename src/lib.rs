@@ -4,12 +4,10 @@
 pub mod lock;
 pub use lock::Lock;
 
-pub mod opcode;
-pub use opcode::Opcode;
-
 pub mod semaphore;
 pub use semaphore::Semaphore;
 
+mod opcode;
 mod sync_primitive;
 mod wait_queue;
 

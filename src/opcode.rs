@@ -2,7 +2,7 @@
 
 /// Operation types.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum Opcode {
+pub(crate) enum Opcode {
     /// Acquires exclusive ownership.
     Exclusive,
     /// Acquires shared ownership.

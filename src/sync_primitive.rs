@@ -10,7 +10,7 @@ use std::thread;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
 
-use crate::Opcode;
+use crate::opcode::Opcode;
 use crate::wait_queue::WaitQueue;
 
 /// Define base operations for synchronization primitives.

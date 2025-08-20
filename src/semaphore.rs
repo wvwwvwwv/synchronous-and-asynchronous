@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
 
-use crate::Opcode;
+use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::WaitQueue;
 
