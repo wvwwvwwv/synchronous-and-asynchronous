@@ -11,7 +11,7 @@ use std::thread;
 use loom::sync::atomic::AtomicUsize;
 
 use crate::opcode::Opcode;
-use crate::wait_queue::WaitQueue;
+use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
 
 /// Define base operations for synchronization primitives.
 pub(crate) trait SyncPrimitive: Sized {
@@ -29,8 +29,8 @@ pub(crate) trait SyncPrimitive: Sized {
 
     /// Tries to push a wait queue entry into the wait queue.
     #[must_use]
-    fn try_push_wait_queue_entry(&self, entry: &mut Pin<&mut WaitQueue>, state: usize) -> bool {
-        let entry_addr = WaitQueue::ref_to_ptr(entry).expose_provenance();
+    fn try_push_wait_queue_entry(&self, entry: Pin<&WaitQueue>, state: usize) -> bool {
+        let entry_addr = WaitQueue::ref_to_ptr(&entry).expose_provenance();
         debug_assert_eq!(entry_addr & (!WaitQueue::ADDR_MASK), 0);
 
         entry.update_next_entry_ptr(WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK));
@@ -43,27 +43,50 @@ pub(crate) trait SyncPrimitive: Sized {
     /// Waits for the desired resources asynchronously.
     async fn wait_resources_async(&self, state: usize, mode: Opcode) -> bool {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-        let mut async_wait = WaitQueue::new(
+
+        if cfg!(miri) {
+            return false;
+        }
+
+        let async_wait = WaitQueue::new(
             mode,
             Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
         );
-        let mut async_wait_pinned = Pin::new(&mut async_wait);
-        if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
-            async_wait_pinned.set_result(false);
+        let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
+        debug_assert_eq!(
+            addr_of!(async_wait),
+            WaitQueue::ref_to_ptr(&pinned_async_wait.0)
+        );
+
+        if !self.try_push_wait_queue_entry(pinned_async_wait.0, state) {
+            pinned_async_wait.0.set_result(false);
+            pinned_async_wait.0.result_acknowledged();
+            return false;
         }
-        async_wait_pinned.await
+        pinned_async_wait.await
     }
 
     /// Waits for the desired resources synchronously.
     #[must_use]
     fn wait_resources_sync(&self, state: usize, mode: Opcode) -> bool {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-        let mut sync_wait = WaitQueue::new(mode, None);
-        let mut sync_wait_pinned = Pin::new(&mut sync_wait);
-        if !self.try_push_wait_queue_entry(&mut sync_wait_pinned, state) {
-            sync_wait_pinned.set_result(false);
+
+        if cfg!(miri) {
+            return false;
         }
-        sync_wait_pinned.poll_result()
+
+        let sync_wait = WaitQueue::new(mode, None);
+        let pinned_sync_wait = Pin::new(&sync_wait);
+        debug_assert_eq!(
+            addr_of!(sync_wait),
+            WaitQueue::ref_to_ptr(&pinned_sync_wait)
+        );
+
+        if self.try_push_wait_queue_entry(pinned_sync_wait, state) {
+            pinned_sync_wait.poll_result_sync()
+        } else {
+            false
+        }
     }
 
     /// Releases resources represented by the supplied operation mode.
@@ -86,8 +109,11 @@ pub(crate) trait SyncPrimitive: Sized {
                 }
             } else {
                 // The wait queue is not empty and not being processed.
-                match self.try_process_wait_queue(state, 0, mode) {
-                    Ok(()) => return true,
+                match self.try_start_process_wait_queue(state, mode) {
+                    Ok(new_state) => {
+                        self.process_wait_queue(new_state);
+                        return true;
+                    }
                     Err(new_state) => state = new_state,
                 }
             }
@@ -125,30 +151,16 @@ pub(crate) trait SyncPrimitive: Sized {
         Ok(next_state)
     }
 
-    /// Tries to process the wait queue after releasing resources specified by the operation mode
-    /// and locking the wait queue.
-    ///
-    /// Returns `Err` if locking the wait queue failed, the wait queue no longer needs to be
-    /// processed, of the wrong argument was supplied.
-    fn try_process_wait_queue(
-        &self,
-        mut state: usize,
-        entry_addr_to_remove: usize,
-        mode: Opcode,
-    ) -> Result<(), usize> {
-        state = self.try_start_process_wait_queue(state, mode)?;
-
-        if entry_addr_to_remove != 0 {
-            state = self.remove_wait_queue_entry(state, entry_addr_to_remove);
-        }
-
+    /// Processes the wait queue.
+    fn process_wait_queue(&self, mut state: usize) {
         let mut head_entry_ptr: *const WaitQueue = null();
-        loop {
+        let mut unlocked = false;
+        while !unlocked {
             debug_assert_eq!(state & WaitQueue::LOCKED_FLAG, WaitQueue::LOCKED_FLAG);
 
             let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
             if head_entry_ptr.is_null() {
-                WaitQueue::any_forward(tail_entry_ptr, |entry, next_entry| {
+                WaitQueue::iter_forward(tail_entry_ptr, |entry, next_entry| {
                     if next_entry.is_none() {
                         head_entry_ptr = WaitQueue::ref_to_ptr(entry);
                     }
@@ -160,10 +172,10 @@ pub(crate) trait SyncPrimitive: Sized {
 
             let data = state & WaitQueue::DATA_MASK;
             let mut transferred = 0;
-            let mut obsolete_entry_ptr: *const WaitQueue = null();
-            let mut unlocked = false;
+            let mut resolved_entry_ptr: *const WaitQueue = null();
+            let mut reset_failed = false;
 
-            WaitQueue::any_backward(head_entry_ptr, |entry, prev_entry| {
+            WaitQueue::iter_backward(head_entry_ptr, |entry, prev_entry| {
                 let desired = entry.opcode().release_count();
                 if data + transferred == 0
                     || data + transferred + desired <= Self::max_shared_owners()
@@ -180,6 +192,7 @@ pub(crate) trait SyncPrimitive: Sized {
                             // This entry will be processed on a retry.
                             entry.update_next_entry_ptr(null());
                             head_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                            reset_failed = true;
                             return true;
                         }
 
@@ -187,7 +200,7 @@ pub(crate) trait SyncPrimitive: Sized {
                         unlocked = true;
                     }
 
-                    obsolete_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                    resolved_entry_ptr = WaitQueue::ref_to_ptr(entry);
                     transferred += desired;
                     unlocked
                 } else {
@@ -197,13 +210,18 @@ pub(crate) trait SyncPrimitive: Sized {
                     true
                 }
             });
-            debug_assert_eq!(obsolete_entry_ptr.is_null(), transferred == 0);
+            debug_assert_eq!(resolved_entry_ptr.is_null(), transferred == 0);
 
-            if !unlocked {
-                unlocked = if self
+            if reset_failed {
+                debug_assert!(!unlocked);
+                state = self.state().fetch_add(transferred, Release) + transferred;
+            } else if !unlocked {
+                if self
                     .state()
                     .fetch_update(AcqRel, Acquire, |new_state| {
                         let new_data = new_state & WaitQueue::DATA_MASK;
+                        debug_assert!(new_data + transferred <= WaitQueue::DATA_MASK);
+
                         if new_state == state || new_data == data {
                             let next_state =
                                 (new_state & WaitQueue::ADDR_MASK) | (new_data + transferred);
@@ -215,48 +233,57 @@ pub(crate) trait SyncPrimitive: Sized {
                     .is_err()
                 {
                     state = self.state().fetch_add(transferred, Release) + transferred;
-                    false
                 } else {
-                    true
-                };
+                    unlocked = true;
+                }
             }
 
-            WaitQueue::any_forward(obsolete_entry_ptr, |entry, _next_entry| {
+            WaitQueue::iter_forward(resolved_entry_ptr, |entry, _next_entry| {
                 entry.set_result(true);
+                // The lock can be released here.
                 false
             });
-
-            if unlocked {
-                return Ok(());
-            }
         }
     }
 
     /// Removes a wait queue entry from the wait queue.
-    fn remove_wait_queue_entry(&self, mut state: usize, entry_addr_to_remove: usize) -> usize {
+    fn remove_wait_queue_entry(
+        &self,
+        mut state: usize,
+        entry_addr_to_remove: usize,
+    ) -> (usize, bool) {
+        let target_ptr = WaitQueue::addr_to_ptr(entry_addr_to_remove);
+        let mut result = Ok((state, false));
+
         loop {
             debug_assert_eq!(state & WaitQueue::LOCKED_FLAG, WaitQueue::LOCKED_FLAG);
             debug_assert_ne!(state & WaitQueue::ADDR_MASK, 0);
 
             let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
-            let target_ptr = WaitQueue::addr_to_ptr(entry_addr_to_remove);
-            let mut result = Ok(state);
-            WaitQueue::any_forward(tail_entry_ptr, |entry, next_entry| {
+            WaitQueue::iter_forward(tail_entry_ptr, |entry, next_entry| {
                 if WaitQueue::ref_to_ptr(entry) == target_ptr {
                     if let Some(next_entry) = next_entry {
                         next_entry.update_prev_entry_ptr(entry.prev_entry_ptr());
                     }
                     if let Some(prev_entry) = unsafe { entry.prev_entry_ptr().as_ref() } {
                         prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
+                        result = Ok((state, true));
                     } else {
                         let next_entry_ptr = next_entry.map_or(null(), WaitQueue::ref_to_ptr);
+                        debug_assert_eq!(next_entry_ptr.addr() & (!WaitQueue::ADDR_MASK), 0);
+
                         let next_state =
-                            (state & !WaitQueue::ADDR_MASK) | next_entry_ptr.expose_provenance();
+                            (state & (!WaitQueue::ADDR_MASK)) | next_entry_ptr.expose_provenance();
+                        debug_assert_eq!(
+                            next_state & WaitQueue::LOCKED_FLAG,
+                            WaitQueue::LOCKED_FLAG
+                        );
+
                         match self
                             .state()
                             .compare_exchange(state, next_state, AcqRel, Acquire)
                         {
-                            Ok(_) => result = Ok(next_state),
+                            Ok(_) => result = Ok((next_state, true)),
                             Err(new_state) => result = Err(new_state),
                         }
                     }
@@ -267,7 +294,7 @@ pub(crate) trait SyncPrimitive: Sized {
             });
 
             match result {
-                Ok(state) => return state,
+                Ok((state, removed)) => return (state, removed),
                 Err(new_state) => state = new_state,
             }
         }
@@ -282,25 +309,42 @@ pub(crate) trait SyncPrimitive: Sized {
 
         // Remove the wait queue entry from the wait queue list.
         let mut state = this.state().load(Acquire);
-        if state & WaitQueue::ADDR_MASK != 0 {
-            while let Err(new_state) =
-                this.try_process_wait_queue(state, wait_queue_addr, Opcode::Cleanup)
-            {
-                if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
-                    // Another thread is processing the wait queue.
-                    thread::yield_now();
+        let mut need_completion = false;
+        loop {
+            match this.try_start_process_wait_queue(state, Opcode::Cleanup) {
+                Ok(new_state) => state = new_state,
+                Err(new_state) => {
+                    if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
+                        // Another thread is processing the wait queue.
+                        thread::yield_now();
+                        state = this.state().load(Acquire);
+                        continue;
+                    }
+
+                    // The wait queue is empty.
+                    debug_assert_eq!(new_state & WaitQueue::LOCKED_FLAG, 0);
+                    debug_assert_eq!(new_state & WaitQueue::ADDR_MASK, 0);
                     state = new_state;
-                    debug_assert_ne!(state & WaitQueue::ADDR_MASK, 0);
-                    continue;
+                    need_completion = true;
                 }
-                // The wait queue is empty.
-                debug_assert_eq!(new_state & WaitQueue::ADDR_MASK, 0);
-                break;
+            }
+            break;
+        }
+
+        if state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
+            let (new_state, removed) = this.remove_wait_queue_entry(state, wait_queue_addr);
+            this.process_wait_queue(new_state);
+
+            if !removed {
+                need_completion = true;
             }
         }
 
-        // Release any acquired locks if the wait queue was processed.
-        if entry.async_poll_completed() {
+        if need_completion {
+            // The entry was removed from another thread, so will be completed.
+            while !entry.result_finalized() {
+                thread::yield_now();
+            }
             this.release_loop(state, entry.opcode());
         }
     }
@@ -309,13 +353,19 @@ pub(crate) trait SyncPrimitive: Sized {
     #[cfg(test)]
     fn test_drop_wait_queue_entry(&self, mode: Opcode) {
         let state = self.state().load(Acquire);
-        let mut async_wait = WaitQueue::new(
+        let async_wait = WaitQueue::new(
             mode,
             Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
         );
-        let mut async_wait_pinned = std::pin::Pin::new(&mut async_wait);
-        if !self.try_push_wait_queue_entry(&mut async_wait_pinned, state) {
-            async_wait_pinned.set_result(false);
+        let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
+        debug_assert_eq!(
+            addr_of!(async_wait),
+            WaitQueue::ref_to_ptr(&pinned_async_wait.0)
+        );
+
+        if !self.try_push_wait_queue_entry(pinned_async_wait.0, state) {
+            pinned_async_wait.0.set_result(false);
+            pinned_async_wait.0.result_acknowledged();
         }
     }
 }

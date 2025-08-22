@@ -16,6 +16,15 @@ Low-level synchronization primitives that provide both synchronous and asynchron
 
 `saa::Lock` is a Low-level shared-exclusive lock that provides both synchronous and asynchronous interfaces. Synchronous locking methods such as `lock_exclusive_sync` or `lock_shared_sync` can be used with their asynchronous counterparts, `lock_exclusive_async` or `lock_shared_async`, at the same time. `saa::Lock` implements a heap-allocation-free fair wait queue that is shared among both synchronous and asynchronous methods.
 
+## Notes
+
+Use of synchronous methods in an asynchronous context may lead to a deadlock. Suppose a scenario where an asynchronous runtime provides two threads executing three tasks.
+
+* ThreadId(0): `task-0: shared-lock-waiting / pending` || `task-1: "synchronous"-exclusive-lock-waiting`.
+* ThreadId(1): `task-2: release-exclusive-lock / ready: wake-up task-0` -> `task-2: exclusive-lock-waiting / pending`.
+
+In the above example, `task-0` logically has acquired a shared lock which was transferred from `task-2`, it may remain in the task queue indefinitely, depending on the scheduling policy of the asynchronous runtime.
+
 ### Examples
 
 ```rust

@@ -364,7 +364,7 @@ impl fmt::Debug for Lock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.load(Relaxed);
         let lock_share_state = state & WaitQueue::DATA_MASK;
-        let locked = state == WaitQueue::DATA_MASK;
+        let locked = lock_share_state == WaitQueue::DATA_MASK;
         let share_count = if locked { 0 } else { lock_share_state };
         let wait_queue_being_processed = state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG;
         let wait_queue_tail_addr = state & WaitQueue::ADDR_MASK;

@@ -326,7 +326,7 @@ impl Semaphore {
 impl fmt::Debug for Semaphore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.load(Relaxed);
-        let available_permits = self.available_permits(Relaxed);
+        let available_permits = Self::MAX_PERMITS - (state & WaitQueue::DATA_MASK);
         let wait_queue_being_processed = state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG;
         let wait_queue_tail_addr = state & WaitQueue::ADDR_MASK;
         f.debug_struct("WaitQueue")
