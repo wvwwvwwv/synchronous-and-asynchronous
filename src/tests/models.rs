@@ -10,13 +10,13 @@ use crate::{Lock, Semaphore};
 fn lock_shared() {
     loom::model(|| {
         let lock = Arc::new(Lock::default());
-        lock.lock_exclusive_sync();
+        lock.lock_sync();
         let lock_clone = lock.clone();
         let thread = spawn(move || {
-            lock_clone.lock_shared_sync();
-            assert!(lock_clone.unlock_shared());
+            lock_clone.share_sync();
+            assert!(lock_clone.release_share());
         });
-        assert!(lock.unlock_exclusive());
+        assert!(lock.release_lock());
         assert!(thread.join().is_ok());
     });
 }
@@ -25,13 +25,13 @@ fn lock_shared() {
 fn lock_exclusive() {
     loom::model(|| {
         let lock = Arc::new(Lock::default());
-        lock.lock_shared_sync();
+        lock.share_sync();
         let lock_clone = lock.clone();
         let thread = spawn(move || {
-            lock_clone.lock_exclusive_sync();
-            assert!(lock_clone.unlock_exclusive());
+            lock_clone.lock_sync();
+            assert!(lock_clone.release_lock());
         });
-        assert!(lock.unlock_shared());
+        assert!(lock.release_share());
         assert!(thread.join().is_ok());
     });
 }

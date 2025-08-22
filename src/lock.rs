@@ -5,7 +5,7 @@
 use std::fmt;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
+use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
@@ -40,7 +40,7 @@ impl Lock {
     /// let lock = Lock::default();
     /// assert!(lock.is_free(Relaxed));
     ///
-    /// lock.lock_exclusive_sync();
+    /// lock.lock_sync();
     /// assert!(!lock.is_free(Relaxed));
     /// ```
     #[inline]
@@ -60,7 +60,7 @@ impl Lock {
     /// let lock = Lock::default();
     /// assert!(!lock.is_locked(Relaxed));
     ///
-    /// lock.lock_exclusive_sync();
+    /// lock.lock_sync();
     /// assert!(lock.is_locked(Relaxed));
     /// assert!(!lock.is_shared(Relaxed));
     /// ```
@@ -81,7 +81,7 @@ impl Lock {
     ///
     /// assert!(!lock.is_shared(Relaxed));
     ///
-    /// lock.lock_shared_sync();
+    /// lock.share_sync();
     /// assert!(lock.is_shared(Relaxed));
     /// assert!(!lock.is_locked(Relaxed));
     /// ```
@@ -102,15 +102,15 @@ impl Lock {
     /// let lock = Lock::default();
     ///
     /// async {
-    ///     lock.lock_exclusive_async().await;
+    ///     lock.lock_async().await;
     ///     assert!(lock.is_locked(Relaxed));
     ///     assert!(!lock.is_shared(Relaxed))
     /// };
     /// ```
     #[inline]
-    pub async fn lock_exclusive_async(&self) {
+    pub async fn lock_async(&self) {
         loop {
-            let (result, state) = self.try_lock_exclusive_internal();
+            let (result, state) = self.try_lock_internal();
             if result {
                 return;
             }
@@ -130,15 +130,15 @@ impl Lock {
     ///
     /// let lock = Lock::default();
     ///
-    /// lock.lock_exclusive_sync();
+    /// lock.lock_sync();
     ///
     /// assert!(lock.is_locked(Relaxed));
-    /// assert!(!lock.try_lock_shared());
+    /// assert!(!lock.try_share());
     /// ```
     #[inline]
-    pub fn lock_exclusive_sync(&self) {
+    pub fn lock_sync(&self) {
         loop {
-            let (result, state) = self.try_lock_exclusive_internal();
+            let (result, state) = self.try_lock_internal();
             if result {
                 return;
             }
@@ -159,13 +159,13 @@ impl Lock {
     ///
     /// let lock = Lock::default();
     ///
-    /// assert!(lock.try_lock_exclusive());
-    /// assert!(!lock.try_lock_shared());
-    /// assert!(!lock.try_lock_exclusive());
+    /// assert!(lock.try_lock());
+    /// assert!(!lock.try_share());
+    /// assert!(!lock.try_lock());
     /// ```
     #[inline]
-    pub fn try_lock_exclusive(&self) -> bool {
-        self.try_lock_exclusive_internal().0
+    pub fn try_lock(&self) -> bool {
+        self.try_lock_internal().0
     }
 
     /// Acquires a shared lock asynchronously.
@@ -179,15 +179,15 @@ impl Lock {
     /// let lock = Lock::default();
     ///
     /// async {
-    ///     lock.lock_shared_async().await;
+    ///     lock.share_async().await;
     ///     assert!(!lock.is_locked(Relaxed));
     ///     assert!(lock.is_shared(Relaxed))
     /// };
     /// ```
     #[inline]
-    pub async fn lock_shared_async(&self) {
+    pub async fn share_async(&self) {
         loop {
-            let (result, state) = self.try_lock_shared_internal();
+            let (result, state) = self.try_share_internal();
             if result {
                 return;
             }
@@ -207,15 +207,15 @@ impl Lock {
     ///
     /// let lock = Lock::default();
     ///
-    /// lock.lock_shared_sync();
+    /// lock.share_sync();
     ///
     /// assert!(lock.is_shared(Relaxed));
-    /// assert!(!lock.try_lock_exclusive());
+    /// assert!(!lock.try_lock());
     /// ```
     #[inline]
-    pub fn lock_shared_sync(&self) {
+    pub fn share_sync(&self) {
         loop {
-            let (result, state) = self.try_lock_shared_internal();
+            let (result, state) = self.try_share_internal();
             if result {
                 return;
             }
@@ -237,13 +237,13 @@ impl Lock {
     ///
     /// let lock = Lock::default();
     ///
-    /// assert!(lock.try_lock_shared());
-    /// assert!(lock.try_lock_shared());
-    /// assert!(!lock.try_lock_exclusive());
+    /// assert!(lock.try_share());
+    /// assert!(lock.try_share());
+    /// assert!(!lock.try_lock());
     /// ```
     #[inline]
-    pub fn try_lock_shared(&self) -> bool {
-        self.try_lock_shared_internal().0
+    pub fn try_share(&self) -> bool {
+        self.try_share_internal().0
     }
 
     /// Releases an exclusive lock.
@@ -257,19 +257,19 @@ impl Lock {
     ///
     /// let lock = Lock::default();
     ///
-    /// lock.lock_exclusive_sync();
+    /// lock.lock_sync();
     ///
-    /// assert!(lock.unlock_exclusive());
-    /// assert!(!lock.unlock_exclusive());
+    /// assert!(lock.release_lock());
+    /// assert!(!lock.release_lock());
     ///
-    /// assert!(lock.try_lock_shared());
-    /// assert!(!lock.unlock_exclusive());
+    /// assert!(lock.try_share());
+    /// assert!(!lock.release_lock());
     /// ```
     #[inline]
-    pub fn unlock_exclusive(&self) -> bool {
+    pub fn release_lock(&self) -> bool {
         match self
             .state
-            .compare_exchange(WaitQueue::DATA_MASK, 0, Acquire, Relaxed)
+            .compare_exchange(WaitQueue::DATA_MASK, 0, Release, Relaxed)
         {
             Ok(_) => true,
             Err(state) => self.release_loop(state, Opcode::Exclusive),
@@ -287,27 +287,27 @@ impl Lock {
     ///
     /// let lock = Lock::default();
     ///
-    /// lock.lock_shared_sync();
-    /// lock.lock_shared_sync();
+    /// lock.share_sync();
+    /// lock.share_sync();
     ///
-    /// assert!(lock.unlock_shared());
+    /// assert!(lock.release_share());
     ///
-    /// assert!(!lock.try_lock_exclusive());
-    /// assert!(lock.unlock_shared());
+    /// assert!(!lock.try_lock());
+    /// assert!(lock.release_share());
     ///
-    /// assert!(!lock.unlock_shared());
-    /// assert!(lock.try_lock_exclusive());
+    /// assert!(!lock.release_share());
+    /// assert!(lock.try_lock());
     /// ```
     #[inline]
-    pub fn unlock_shared(&self) -> bool {
-        match self.state.compare_exchange(1, 0, Acquire, Relaxed) {
+    pub fn release_share(&self) -> bool {
+        match self.state.compare_exchange(1, 0, Release, Relaxed) {
             Ok(_) => true,
             Err(state) => self.release_loop(state, Opcode::Shared),
         }
     }
 
     /// Tries to acquire an exclusive lock.
-    fn try_lock_exclusive_internal(&self) -> (bool, usize) {
+    fn try_lock_internal(&self) -> (bool, usize) {
         let Err(mut state) = self
             .state
             .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Relaxed)
@@ -336,7 +336,7 @@ impl Lock {
     }
 
     /// Tries to acquire a shared lock.
-    fn try_lock_shared_internal(&self) -> (bool, usize) {
+    fn try_share_internal(&self) -> (bool, usize) {
         let Err(mut state) = self.state.compare_exchange(0, 1, Acquire, Relaxed) else {
             return (true, 0);
         };

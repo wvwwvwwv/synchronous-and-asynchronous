@@ -5,8 +5,8 @@ fn exclusive_unlock(c: &mut Criterion) {
     c.bench_function("lock-exclusive-unlock", |b| {
         b.iter(|| {
             let lock = Lock::default();
-            lock.lock_exclusive_sync();
-            assert!(lock.unlock_exclusive());
+            lock.lock_sync();
+            assert!(lock.release_lock());
         });
     });
 }
@@ -15,10 +15,10 @@ fn shared_shared_unlock_unlock(c: &mut Criterion) {
     c.bench_function("share-shared-unlock-unlock", |b| {
         b.iter(|| {
             let lock = Lock::default();
-            lock.lock_shared_sync();
-            lock.lock_shared_sync();
-            assert!(lock.unlock_shared());
-            assert!(lock.unlock_shared());
+            lock.share_sync();
+            lock.share_sync();
+            assert!(lock.release_share());
+            assert!(lock.release_share());
         });
     });
 }

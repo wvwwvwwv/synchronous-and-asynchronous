@@ -6,7 +6,7 @@
 use std::fmt;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{self, Acquire, Relaxed};
+use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
@@ -263,7 +263,7 @@ impl Semaphore {
     /// ```
     #[inline]
     pub fn release(&self) -> bool {
-        match self.state.compare_exchange(1, 0, Acquire, Relaxed) {
+        match self.state.compare_exchange(1, 0, Release, Relaxed) {
             Ok(_) => true,
             Err(state) => self.release_loop(state, Opcode::Semaphore(1)),
         }
@@ -294,7 +294,7 @@ impl Semaphore {
         };
         match self
             .state
-            .compare_exchange(count as usize, 0, Acquire, Relaxed)
+            .compare_exchange(count as usize, 0, Release, Relaxed)
         {
             Ok(_) => true,
             Err(state) => self.release_loop(state, Opcode::Semaphore(count)),

@@ -4,13 +4,13 @@ use saa::{Lock, Semaphore};
 fn lock_exclusive() {
     let lock = Lock::default();
 
-    lock.lock_exclusive_sync();
+    lock.lock_sync();
 
-    assert!(!lock.try_lock_exclusive());
-    assert!(!lock.try_lock_shared());
+    assert!(!lock.try_lock());
+    assert!(!lock.try_share());
 
-    assert!(!lock.unlock_shared());
-    assert!(lock.unlock_exclusive());
+    assert!(!lock.release_share());
+    assert!(lock.release_lock());
 }
 
 #[test]

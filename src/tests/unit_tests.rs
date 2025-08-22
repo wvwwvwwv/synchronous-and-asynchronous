@@ -16,7 +16,7 @@ async fn lock_shared_wait() {
     let lock = Arc::new(Lock::default());
     let check = Arc::new(AtomicUsize::new(0));
 
-    lock.lock_exclusive_async().await;
+    lock.lock_async().await;
     check.fetch_add(usize::MAX, Relaxed);
 
     let mut tasks = Vec::new();
@@ -25,29 +25,29 @@ async fn lock_shared_wait() {
         let check = check.clone();
         tasks.push(tokio::spawn(async move {
             if i % 8 == 0 {
-                lock.lock_shared_sync();
+                lock.share_sync();
             } else {
-                lock.lock_shared_async().await;
+                lock.share_async().await;
             }
             assert_ne!(check.fetch_add(1, Relaxed), usize::MAX);
             check.fetch_sub(1, Relaxed);
-            assert!(lock.unlock_shared());
-            lock.lock_shared_async().await;
-            assert!(lock.unlock_shared());
+            assert!(lock.release_share());
+            lock.share_async().await;
+            assert!(lock.release_share());
         }));
     }
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     check.fetch_sub(usize::MAX, Relaxed);
-    assert!(lock.unlock_exclusive());
+    assert!(lock.release_lock());
 
     for task in tasks {
         task.await.unwrap();
     }
     assert_eq!(check.load(Relaxed), 0);
 
-    lock.lock_exclusive_async().await;
-    assert!(lock.unlock_exclusive());
+    lock.lock_async().await;
+    assert!(lock.release_lock());
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
@@ -106,7 +106,7 @@ fn lock_sync() {
     let lock = Arc::new(Lock::default());
     let check = Arc::new(AtomicUsize::new(0));
 
-    lock.lock_exclusive_sync();
+    lock.lock_sync();
     check.fetch_add(usize::MAX, Relaxed);
 
     let mut threads = Vec::new();
@@ -116,17 +116,17 @@ fn lock_sync() {
         threads.push(thread::spawn(move || {
             for j in 0..num_iters {
                 if j % 11 == 0 {
-                    lock.lock_exclusive_sync();
+                    lock.lock_sync();
                     assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
                     thread::sleep(Duration::from_micros(1));
                     check.fetch_sub(usize::MAX, Relaxed);
-                    assert!(lock.unlock_exclusive());
+                    assert!(lock.release_lock());
                 } else {
-                    lock.lock_shared_sync();
+                    lock.share_sync();
                     assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
                     thread::sleep(Duration::from_micros(1));
                     check.fetch_sub(1, Relaxed);
-                    assert!(lock.unlock_shared());
+                    assert!(lock.release_share());
                 }
             }
         }));
@@ -134,7 +134,7 @@ fn lock_sync() {
 
     thread::sleep(Duration::from_micros(1));
     check.fetch_sub(usize::MAX, Relaxed);
-    assert!(lock.unlock_exclusive());
+    assert!(lock.release_lock());
 
     for thread in threads {
         thread.join().unwrap();
@@ -185,32 +185,32 @@ fn semaphore_sync() {
 #[test]
 fn drop_future() {
     let lock = Arc::new(Lock::default());
-    lock.lock_exclusive_sync();
+    lock.lock_sync();
 
     let mut threads = Vec::new();
     for i in 0..2 {
         let lock = lock.clone();
         threads.push(thread::spawn(move || {
             if i == 0 {
-                lock.lock_exclusive_sync();
-                assert!(lock.unlock_exclusive());
+                lock.lock_sync();
+                assert!(lock.release_lock());
             } else {
-                lock.lock_shared_sync();
-                assert!(lock.unlock_shared());
+                lock.share_sync();
+                assert!(lock.release_share());
             }
         }));
     }
 
     lock.test_drop_wait_queue_entry(Opcode::Exclusive);
     lock.test_drop_wait_queue_entry(Opcode::Shared);
-    assert!(lock.unlock_exclusive());
+    assert!(lock.release_lock());
 
     for thread in threads {
         thread.join().unwrap();
     }
 
-    lock.lock_exclusive_sync();
-    assert!(lock.unlock_exclusive());
+    lock.lock_sync();
+    assert!(lock.release_lock());
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
@@ -231,15 +231,15 @@ async fn lock_chaos() {
             tasks.push(tokio::spawn(async move {
                 for j in 0..num_iters {
                     if j % 11 == 0 {
-                        lock.lock_exclusive_async().await;
+                        lock.lock_async().await;
                         assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
                         check.fetch_sub(usize::MAX, Relaxed);
-                        assert!(lock.unlock_exclusive());
+                        assert!(lock.release_lock());
                     } else {
-                        lock.lock_shared_async().await;
+                        lock.share_async().await;
                         assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
                         check.fetch_sub(1, Relaxed);
-                        assert!(lock.unlock_shared());
+                        assert!(lock.release_share());
                     }
                 }
             }));
@@ -249,15 +249,15 @@ async fn lock_chaos() {
                     if j % 17 == 1 {
                         lock.test_drop_wait_queue_entry(Opcode::Exclusive);
                     } else if j % 11 == 0 {
-                        lock.lock_exclusive_sync();
+                        lock.lock_sync();
                         assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
                         check.fetch_sub(usize::MAX, Relaxed);
-                        assert!(lock.unlock_exclusive());
+                        assert!(lock.release_lock());
                     } else {
-                        lock.lock_shared_sync();
+                        lock.share_sync();
                         assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
                         check.fetch_sub(1, Relaxed);
-                        assert!(lock.unlock_shared());
+                        assert!(lock.release_share());
                     }
                 }
             }));
