@@ -17,7 +17,7 @@ use crate::wait_queue::WaitQueue;
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 ///
 /// The locking semantics is similar to [`RwLock`](std::sync::RwLock), however, [`Lock`] only
-/// provides low-level locking and un-locking methods, hence forcing the user to manage the scope of
+/// provides low-level locking and releasing methods, hence forcing the user to manage the scope of
 /// acquired locks and resources to protect.
 #[derive(Default)]
 pub struct Lock {
@@ -69,7 +69,7 @@ impl Lock {
         (self.state.load(mo) & WaitQueue::DATA_MASK) == WaitQueue::DATA_MASK
     }
 
-    /// Returns `true` if a shared lock is currently held.
+    /// Returns `true` if shared locks are currently held.
     ///
     /// # Examples
     ///

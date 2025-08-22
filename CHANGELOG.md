@@ -1,5 +1,9 @@
 # Changelog
 
+1.0.0
+
+* Stabilize.
+
 0.4.0
 
 * Update API.

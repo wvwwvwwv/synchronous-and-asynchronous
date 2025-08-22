@@ -64,7 +64,7 @@ struct AsyncContext {
 }
 
 /// Contextual data for synchronous [`WaitQueue`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SyncContext {
     /// The state of this entry.
     state: Mutex<Option<bool>>,
@@ -104,7 +104,10 @@ impl WaitQueue {
                 cleaner: async_cleanup_fn,
             })
         } else {
-            Monitor::Sync(SyncContext::default())
+            Monitor::Sync(SyncContext {
+                state: Mutex::new(None),
+                cond_var: Condvar::new(),
+            })
         };
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
@@ -148,9 +151,8 @@ impl WaitQueue {
     }
 
     /// Converts a reference to `Self` to a raw pointer.
-    pub(crate) fn ref_to_ptr(this: &Self) -> *const Self {
+    pub(crate) const fn ref_to_ptr(this: &Self) -> *const Self {
         let wait_queue_ptr: *const Self = from_ref(this);
-        debug_assert_eq!(wait_queue_ptr as usize % align_of::<Self>(), 0);
         wait_queue_ptr
     }
 
@@ -254,43 +256,35 @@ impl WaitQueue {
             debug_assert!(false, "Logic error");
             return Poll::Ready(false);
         };
-        if async_context.finalized.load(Acquire) {
-            debug_assert!(async_context.ready.load(Relaxed));
-            async_context.acknowledged.store(true, Release);
-            return Poll::Ready(async_context.result.load(Relaxed));
+
+        if let Some(result) = async_context.try_acknowledge_result() {
+            return Poll::Ready(result);
         }
 
-        let waker = cx.waker().clone();
+        let mut waker = Some(cx.waker().clone());
         if async_context.ready.load(Acquire) {
             // No need to install the waker.
-            waker.wake();
-            if async_context.finalized.load(Acquire) {
-                debug_assert!(async_context.ready.load(Relaxed));
-                async_context.acknowledged.store(true, Release);
-                return Poll::Ready(async_context.result.load(Relaxed));
+            if let Some(result) = async_context.try_acknowledge_result() {
+                return Poll::Ready(result);
             }
         } else if async_context
             .waker_lock
             .compare_exchange(false, true, AcqRel, Acquire)
             .is_ok()
         {
-            if async_context.ready.load(Acquire) {
-                // The result has been ready in the meantime.
-                waker.wake();
-            } else {
+            if !async_context.ready.load(Acquire) {
                 unsafe {
-                    (*async_context.waker.get()) = Some(waker);
+                    (*async_context.waker.get()) = waker.take();
                 }
             }
             async_context.waker_lock.store(false, Release);
-        } else {
-            // Failing to lock means that the result is ready.
+        }
+
+        if let Some(result) = async_context.try_acknowledge_result() {
+            return Poll::Ready(result);
+        }
+        if let Some(waker) = waker {
             waker.wake();
-            if async_context.finalized.load(Acquire) {
-                debug_assert!(async_context.ready.load(Relaxed));
-                async_context.acknowledged.store(true, Release);
-                return Poll::Ready(async_context.result.load(Relaxed));
-            }
         }
 
         Poll::Pending
@@ -362,6 +356,17 @@ impl Future for PinnedWaitQueue<'_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.0.poll_result_async(cx)
+    }
+}
+
+impl AsyncContext {
+    /// Tries to get the result and acknowledges it.
+    fn try_acknowledge_result(&self) -> Option<bool> {
+        self.finalized.load(Acquire).then(|| {
+            debug_assert!(self.ready.load(Relaxed));
+            self.acknowledged.store(true, Release);
+            self.result.load(Relaxed)
+        })
     }
 }
 

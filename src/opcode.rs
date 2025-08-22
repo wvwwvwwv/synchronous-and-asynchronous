@@ -1,7 +1,7 @@
 //! Primitive synchronization operation types.
 
 /// Operation types.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Opcode {
     /// Acquires exclusive ownership.
     Exclusive,
