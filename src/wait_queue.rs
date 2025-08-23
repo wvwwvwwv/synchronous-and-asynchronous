@@ -8,7 +8,7 @@ use std::ptr::{from_ref, null_mut, with_exposed_provenance};
 use std::sync::Mutex;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 #[cfg(not(feature = "loom"))]
-use std::sync::atomic::{AtomicBool, AtomicPtr};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8};
 use std::task::{Context, Poll, Waker};
 #[cfg(not(feature = "loom"))]
 use std::thread::{Thread, current, park, yield_now};
@@ -16,13 +16,13 @@ use std::thread::{Thread, current, park, yield_now};
 #[cfg(feature = "loom")]
 use loom::sync::Mutex;
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicBool, AtomicPtr};
+use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8};
 #[cfg(feature = "loom")]
 use loom::thread::{Thread, current, park, yield_now};
 
 use crate::opcode::Opcode;
 
-/// Fair and heap-free wait queue for locking primitives in this crate.
+/// Fair and heap-free intrusive wait queue for locking primitives in this crate.
 ///
 /// [`WaitQueue`] itself forms an intrusive linked list of entries where entries are pushed at the
 /// tail and popped from the head. [`WaitQueue`] is `128-byte` aligned thus allowing the lower 7
@@ -37,7 +37,7 @@ pub(crate) struct WaitQueue {
     /// Operation type.
     opcode: Opcode,
     /// Operation result.
-    result: AtomicBool,
+    result: AtomicU8,
     /// Result is set.
     ready: AtomicBool,
     /// The result is finalized, and other threads will not access the context.
@@ -79,6 +79,9 @@ enum Monitor {
 }
 
 impl WaitQueue {
+    /// Reserved value for [`WaitQueue`] internal errors.
+    pub(crate) const INTERNAL_ERROR: u8 = u8::MAX;
+
     /// Indicates that the wait queue is being processed by a thread.
     pub(crate) const LOCKED_FLAG: usize = align_of::<Self>() >> 1;
 
@@ -99,7 +102,7 @@ impl WaitQueue {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
             opcode,
-            result: AtomicBool::new(false),
+            result: AtomicU8::new(0),
             ready: AtomicBool::new(false),
             finalized: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
@@ -116,7 +119,7 @@ impl WaitQueue {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
             opcode,
-            result: AtomicBool::new(false),
+            result: AtomicU8::new(0),
             ready: AtomicBool::new(false),
             finalized: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
@@ -228,7 +231,7 @@ impl WaitQueue {
     }
 
     /// Sets the result to the entry.
-    pub(crate) fn set_result(&self, result: bool) {
+    pub(crate) fn set_result(&self, result: u8) {
         debug_assert!(!self.finalized.load(Relaxed));
         self.result.store(result, Release);
         self.ready.store(true, Release);
@@ -255,10 +258,10 @@ impl WaitQueue {
     }
 
     /// Polls the result, asynchronously.
-    pub(crate) fn poll_result_async(&self, cx: &mut Context<'_>) -> Poll<bool> {
+    pub(crate) fn poll_result_async(&self, cx: &mut Context<'_>) -> Poll<u8> {
         let Monitor::Async(async_context) = &self.monitor else {
             debug_assert!(false, "Logic error");
-            return Poll::Ready(false);
+            return Poll::Ready(Self::INTERNAL_ERROR);
         };
 
         if let Some(result) = self.try_acknowledge_result() {
@@ -288,10 +291,10 @@ impl WaitQueue {
     }
 
     /// Polls the result, synchronously.
-    pub(crate) fn poll_result_sync(&self) -> bool {
+    pub(crate) fn poll_result_sync(&self) -> u8 {
         let Monitor::Sync(sync_context) = &self.monitor else {
             debug_assert!(false, "Logic error");
-            return false;
+            return Self::INTERNAL_ERROR;
         };
 
         loop {
@@ -335,7 +338,7 @@ impl WaitQueue {
     }
 
     /// Tries to get the result and acknowledges it.
-    fn try_acknowledge_result(&self) -> Option<bool> {
+    fn try_acknowledge_result(&self) -> Option<u8> {
         self.finalized.load(Acquire).then(|| {
             debug_assert!(self.ready.load(Relaxed));
             self.acknowledged.store(true, Release);
@@ -357,7 +360,7 @@ impl Drop for WaitQueue {
 }
 
 impl Future for PinnedWaitQueue<'_> {
-    type Output = bool;
+    type Output = u8;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

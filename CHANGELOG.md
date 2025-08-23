@@ -1,5 +1,9 @@
 # Changelog
 
+2.0.0 (WIP)
+
+* `saa::Gate`.
+
 1.0.1
 
 * Minor optimization.

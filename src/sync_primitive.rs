@@ -57,11 +57,12 @@ pub(crate) trait SyncPrimitive: Sized {
         );
 
         if !self.try_push_wait_queue_entry(pinned_async_wait.0, state) {
-            pinned_async_wait.0.set_result(false);
+            pinned_async_wait.0.set_result(0);
             pinned_async_wait.0.result_acknowledged();
             return false;
         }
-        pinned_async_wait.await
+        pinned_async_wait.await;
+        true
     }
 
     /// Waits for the desired resources synchronously.
@@ -81,7 +82,8 @@ pub(crate) trait SyncPrimitive: Sized {
         );
 
         if self.try_push_wait_queue_entry(pinned_sync_wait, state) {
-            pinned_sync_wait.poll_result_sync()
+            pinned_sync_wait.poll_result_sync();
+            true
         } else {
             false
         }
@@ -237,7 +239,7 @@ pub(crate) trait SyncPrimitive: Sized {
             }
 
             WaitQueue::iter_forward(resolved_entry_ptr, |entry, _next_entry| {
-                entry.set_result(true);
+                entry.set_result(0);
                 // The lock can be released here.
                 false
             });
@@ -360,7 +362,7 @@ pub(crate) trait SyncPrimitive: Sized {
         );
 
         if !self.try_push_wait_queue_entry(pinned_async_wait.0, state) {
-            pinned_async_wait.0.set_result(false);
+            pinned_async_wait.0.set_result(0);
             pinned_async_wait.0.result_acknowledged();
         }
     }

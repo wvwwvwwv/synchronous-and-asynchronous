@@ -63,6 +63,18 @@ async {
 };
 ```
 
+## Gate
+
+`saa::Gate` is an unbounded barrier that can be open of sealed manually whenever needed.
+
+### Examples
+
+```rust
+use saa::Gate;
+
+let gate = Gate::default();
+```
+
 ## Notes
 
 Use of synchronous methods in an asynchronous context may lead to a deadlock. Suppose a scenario where an asynchronous runtime provides two threads executing three tasks.
