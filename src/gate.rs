@@ -1,6 +1,10 @@
 //! [`Gate`] is a synchronization primitive that blocks multiple threads until the gate is opened.
 
+#[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
+
+#[cfg(feature = "loom")]
+use loom::sync::atomic::AtomicUsize;
 
 use crate::sync_primitive::SyncPrimitive;
 

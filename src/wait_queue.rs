@@ -1,17 +1,20 @@
 //! Wait queue implementation.
 
-use std::cell::UnsafeCell;
 use std::future::Future;
 use std::mem::align_of;
 use std::pin::Pin;
 use std::ptr::{from_ref, null_mut, with_exposed_provenance};
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+#[cfg(not(feature = "loom"))]
+use std::sync::Mutex;
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::{AtomicBool, AtomicPtr};
 use std::task::{Context, Poll, Waker};
 #[cfg(not(feature = "loom"))]
 use std::thread::{Thread, current, park, yield_now};
 
+#[cfg(feature = "loom")]
+use loom::sync::Mutex;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicBool, AtomicPtr};
 #[cfg(feature = "loom")]
@@ -43,8 +46,6 @@ pub(crate) struct WaitQueue {
     acknowledged: AtomicBool,
     /// Monitors the result.
     monitor: Monitor,
-    /// Lock to protect `monitor`.
-    monitor_lock: AtomicBool,
 }
 
 /// Helper struct for pinning a [`WaitQueue`] to the stack and awaiting it.
@@ -54,7 +55,7 @@ pub(crate) struct PinnedWaitQueue<'w>(pub(crate) Pin<&'w WaitQueue>);
 #[derive(Debug)]
 struct AsyncContext {
     /// Waker to wake an executor when the result is ready.
-    waker: UnsafeCell<Option<Waker>>,
+    waker: Mutex<Option<Waker>>,
     /// Context cleaner when an asynchronous [`WaitQueue`] is cancelled.
     cleaner: fn(&WaitQueue, usize),
     /// Argument to pass to the cleaner function.
@@ -65,7 +66,7 @@ struct AsyncContext {
 #[derive(Debug)]
 struct SyncContext {
     /// Waker to wake an executor when the result is ready.
-    thread: UnsafeCell<Option<Thread>>,
+    thread: Mutex<Option<Thread>>,
 }
 
 /// Monitors the result.
@@ -90,7 +91,7 @@ impl WaitQueue {
     /// Creates a new [`WaitQueue`] for asynchronous method.
     pub(crate) fn new_async(opcode: Opcode, cleaner: fn(&WaitQueue, usize), arg: usize) -> Self {
         let monitor = Monitor::Async(AsyncContext {
-            waker: UnsafeCell::new(None),
+            waker: Mutex::new(None),
             cleaner,
             cleaner_arg: arg,
         });
@@ -103,14 +104,13 @@ impl WaitQueue {
             finalized: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
             monitor,
-            monitor_lock: AtomicBool::new(false),
         }
     }
 
     /// Creates a new [`WaitQueue`] for synchronous method.
     pub(crate) fn new_sync(opcode: Opcode) -> Self {
         let monitor = Monitor::Sync(SyncContext {
-            thread: UnsafeCell::new(None),
+            thread: Mutex::new(None),
         });
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
@@ -121,7 +121,6 @@ impl WaitQueue {
             finalized: AtomicBool::new(false),
             acknowledged: AtomicBool::new(false),
             monitor,
-            monitor_lock: AtomicBool::new(false),
         }
     }
 
@@ -233,24 +232,23 @@ impl WaitQueue {
         debug_assert!(!self.finalized.load(Relaxed));
         self.result.store(result, Release);
         self.ready.store(true, Release);
-        if self
-            .monitor_lock
-            .compare_exchange(false, true, AcqRel, Relaxed)
-            .is_ok()
-        {
-            match &self.monitor {
-                Monitor::Async(async_context) => unsafe {
-                    if let Some(waker) = (*async_context.waker.get()).take() {
+
+        match &self.monitor {
+            Monitor::Async(async_context) => {
+                // Try-locking is sufficient.
+                if let Ok(mut waker) = async_context.waker.try_lock() {
+                    if let Some(waker) = waker.take() {
                         waker.wake();
                     }
-                },
-                Monitor::Sync(sync_context) => unsafe {
-                    if let Some(thread) = (*sync_context.thread.get()).take() {
+                }
+            }
+            Monitor::Sync(sync_context) => {
+                if let Ok(mut thread) = sync_context.thread.lock() {
+                    if let Some(thread) = thread.take() {
                         thread.unpark();
                     }
-                },
+                }
             }
-            self.monitor_lock.store(false, Release);
         }
 
         self.finalized.store(true, Release);
@@ -267,29 +265,22 @@ impl WaitQueue {
             return Poll::Ready(result);
         }
 
-        let mut waker = Some(cx.waker().clone());
+        let mut this_waker = Some(cx.waker().clone());
         if self.ready.load(Acquire) {
             // No need to install the waker.
             if let Some(result) = self.try_acknowledge_result() {
                 return Poll::Ready(result);
             }
-        } else if self
-            .monitor_lock
-            .compare_exchange(false, true, AcqRel, Acquire)
-            .is_ok()
-        {
+        } else if let Ok(mut waker) = async_context.waker.try_lock() {
             if !self.ready.load(Acquire) {
-                unsafe {
-                    (*async_context.waker.get()) = waker.take();
-                }
+                *waker = this_waker.take();
             }
-            self.monitor_lock.store(false, Release);
         }
 
         if let Some(result) = self.try_acknowledge_result() {
             return Poll::Ready(result);
         }
-        if let Some(waker) = waker {
+        if let Some(waker) = this_waker {
             waker.wake();
         }
 
@@ -308,29 +299,22 @@ impl WaitQueue {
                 return result;
             }
 
-            let mut thread = Some(current());
+            let mut this_thread = Some(current());
             if self.ready.load(Acquire) {
                 // No need to install the waker.
                 if let Some(result) = self.try_acknowledge_result() {
                     return result;
                 }
-            } else if self
-                .monitor_lock
-                .compare_exchange(false, true, AcqRel, Acquire)
-                .is_ok()
-            {
+            } else if let Ok(mut thread) = sync_context.thread.lock() {
                 if !self.ready.load(Acquire) {
-                    unsafe {
-                        (*sync_context.thread.get()) = thread.take();
-                    }
+                    *thread = this_thread.take();
                 }
-                self.monitor_lock.store(false, Release);
             }
 
             if let Some(result) = self.try_acknowledge_result() {
                 return result;
             }
-            if thread.is_some() {
+            if this_thread.is_some() {
                 yield_now();
             } else {
                 park();
