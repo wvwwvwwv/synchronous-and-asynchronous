@@ -19,7 +19,7 @@ use crate::wait_queue::WaitQueue;
 /// resource concurrently.
 #[derive(Default)]
 pub struct Semaphore {
-    /// State of the [`Semaphore`].
+    /// [`Semaphore`] state.
     state: AtomicUsize,
 }
 

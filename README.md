@@ -10,7 +10,7 @@ Low-level synchronization primitives that provide both synchronous and asynchron
 
 - Asynchronous counterparts of synchronous methods.
 - [`Loom`](https://github.com/tokio-rs/loom) support: `features = ["loom"]`.
-- No spin-locks and no busy loops.
+- No spin-locks and no busy loops, except for when an asynchronous task waiting for a resource gets cancelled.
 
 ## Lock
 

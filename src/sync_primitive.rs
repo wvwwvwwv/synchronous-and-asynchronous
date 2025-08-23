@@ -48,10 +48,8 @@ pub(crate) trait SyncPrimitive: Sized {
             return false;
         }
 
-        let async_wait = WaitQueue::new(
-            mode,
-            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
-        );
+        let async_wait =
+            WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.self_addr());
         let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
         debug_assert_eq!(
             addr_of!(async_wait),
@@ -75,7 +73,7 @@ pub(crate) trait SyncPrimitive: Sized {
             return false;
         }
 
-        let sync_wait = WaitQueue::new(mode, None);
+        let sync_wait = WaitQueue::new_sync(mode);
         let pinned_sync_wait = Pin::new(&sync_wait);
         debug_assert_eq!(
             addr_of!(sync_wait),
@@ -311,7 +309,7 @@ pub(crate) trait SyncPrimitive: Sized {
         let mut state = this.state().load(Acquire);
         let mut need_completion = false;
         loop {
-            match this.try_start_process_wait_queue(state, Opcode::Cleanup) {
+            match this.try_start_process_wait_queue(state, Opcode::Wait) {
                 Ok(new_state) => state = new_state,
                 Err(new_state) => {
                     if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
@@ -353,10 +351,8 @@ pub(crate) trait SyncPrimitive: Sized {
     #[cfg(test)]
     fn test_drop_wait_queue_entry(&self, mode: Opcode) {
         let state = self.state().load(Acquire);
-        let async_wait = WaitQueue::new(
-            mode,
-            Some((self.self_addr(), Self::cleanup_wait_queue_entry)),
-        );
+        let async_wait =
+            WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.self_addr());
         let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
         debug_assert_eq!(
             addr_of!(async_wait),
@@ -387,7 +383,7 @@ impl Opcode {
                 let count = count as usize;
                 data >= count
             }
-            Opcode::Cleanup => true,
+            Opcode::Wait => true,
         }
     }
 
@@ -402,7 +398,7 @@ impl Opcode {
                 debug_assert!(count <= WaitQueue::LOCKED_FLAG);
                 count
             }
-            Opcode::Cleanup => 0,
+            Opcode::Wait => 0,
         }
     }
 }

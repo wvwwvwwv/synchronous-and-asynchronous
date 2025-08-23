@@ -21,7 +21,7 @@ use crate::wait_queue::WaitQueue;
 /// acquired locks and resources to protect.
 #[derive(Default)]
 pub struct Lock {
-    /// State of the [`Lock`].
+    /// [`Lock`] state.
     state: AtomicUsize,
 }
 

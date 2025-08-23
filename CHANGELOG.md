@@ -1,5 +1,9 @@
 # Changelog
 
+1.0.1
+
+* Minor optimization.
+
 1.0.0
 
 * Stabilize.

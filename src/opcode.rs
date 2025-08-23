@@ -9,6 +9,6 @@ pub(crate) enum Opcode {
     Shared,
     /// Acquires semaphores.
     Semaphore(u8),
-    /// Cleanup stale wait queue entries.
-    Cleanup,
+    /// Waits for a condition without trying to acquire resources.
+    Wait,
 }
