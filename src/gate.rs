@@ -1,17 +1,18 @@
 //! [`Gate`] is a synchronization primitive that blocks tasks to enter a critical section until they
 //! are allowed to do so.
 
-#![allow(clippy::pedantic)]
+#![deny(unsafe_code)]
 
 use std::pin::Pin;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{self, AcqRel, Acquire};
+use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed};
 use std::task::{Context, Poll};
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
 
+use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::WaitQueue;
 
@@ -27,67 +28,98 @@ pub struct Gate {
 ///
 /// [`Gate`] can be in one of three states.
 ///
-/// * `Closed` - The default state where tasks can enter the [`Gate`] if permitted.
+/// * `Controlled` - The default state where tasks can enter the [`Gate`] if permitted.
 /// * `Sealed` - The [`Gate`] is sealed and tasks immediately get rejected to enter it.
 /// * `Open` - The [`Gate`] is open and tasks can immediately enter it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum State {
     /// The default state where tasks can enter the [`Gate`] if permitted.
-    Closed = 0_u8,
-    /// The [`Gate`] is sealed and tasks immediately get rejected to enter it.
+    Controlled = 0_u8,
+    /// The [`Gate`] is sealed and tasks immediately get rejected when they attempt to enter it.
     Sealed = 1_u8,
     /// The [`Gate`] is open and tasks can immediately enter it.
     Open = 2_u8,
 }
 
-/// The result of attempting to enter a [`Gate`].
+/// Errors raised when accessing a [`Gate`].
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
-pub enum Result {
-    /// Successfully entered a [`Gate`]
-    Entered = 0_u8,
-    /// Failed to enter a [`Gate`], since it was sealed.
-    Sealed = 1_u8,
-    /// Failed to enter a [`Gate`], since waiting tasks were cleared it.
-    Cleared = 2_u8,
-    /// Spurious failure to enter a [`Gate`] in a [`Closed`](State::Closed) state.
+pub enum Error {
+    /// The [`Gate`] rejected the task.
+    Rejected = 16_u8,
+    /// The [`Gate`] has been sealed.
+    Sealed = 17_u8,
+    /// Spurious failure to enter a [`Gate`] in a [`Controlled`](State::Controlled) state.
     ///
-    /// This can happen if the [`Gate`] is closed and one of waiting tasks directly holding a
-    /// [`Pager`] has been cancelled.
-    Spurious = 3_u8,
+    /// This can happen if a task holding a [`Pager`] gets cancelled or drops the [`Pager`] before
+    /// the [`Gate`] has permitted or rejected the task; the task causes all the other waiting tasks
+    /// of the [`Gate`] to get this error.
+    SpuriousFailure = 18_u8,
+    /// The [`Pager`] is not registered in any [`Gate`].
+    NotRegistered = 19_u8,
+    /// The wrong asynchronous/synchronous mode was used in a [`Pager`].
+    WrongMode = 20_u8,
+    /// Unknown error.
+    Unknown = 21_u8,
 }
 
 /// Tasks holding a [`Pager`] can remotely get a permit to enter the [`Gate`].
-#[derive(Debug)]
-pub struct Pager {
-    wait_queue_entry: Option<WaitQueue>,
+#[derive(Debug, Default)]
+pub struct Pager<'g> {
+    /// The [`Gate`] that the [`Pager`] is registered in and the wait queue entry for the [`Pager`].
+    entry: Option<(&'g Gate, WaitQueue)>,
 }
 
 impl Gate {
+    /// Mask to get the state value from `u8`.
+    const STATE_MASK: u8 = 0b11;
+
     /// Returns the current state of the [`Gate`].
     ///
     /// # Examples
     ///
     /// ```
     /// use saa::Gate;
+    /// use saa::gate::State;
     /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// assert_eq!(gate.state(Relaxed), State::Controlled);
     /// ```
     #[inline]
     pub fn state(&self, mo: Ordering) -> State {
-        State::from((self.state.load(mo) & WaitQueue::DATA_MASK) as u8)
+        State::from(self.state.load(mo) & WaitQueue::DATA_MASK)
     }
 
-    /// Resets the [`Gate`] to its initial state.
+    /// Resets the [`Gate`] to its initial state if it is not in a [`Controlled`](State::Controlled)
+    /// state.
     ///
+    /// Returns the previous state of the [`Gate`].
     #[inline]
-    pub fn reset(&self) {
-        let _prev = self.state.swap(u8::from(State::Closed) as usize, AcqRel);
+    pub fn reset(&self) -> Option<State> {
+        match self.state.fetch_update(Relaxed, Relaxed, |value| {
+            let state = State::from(value & WaitQueue::DATA_MASK);
+            if state == State::Controlled {
+                None
+            } else {
+                debug_assert_eq!(value & WaitQueue::ADDR_MASK, 0);
+                Some((value & WaitQueue::ADDR_MASK) | u8::from(state) as usize)
+            }
+        }) {
+            Ok(state) => Some(State::from(state & WaitQueue::DATA_MASK)),
+            Err(_) => None,
+        }
     }
 
     /// Permits waiting tasks to enter the [`Gate`].
     ///
     /// Returns the number of permitted tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the [`Gate`] is not in a [`Controlled`](State::Controlled) state.
     ///
     /// # Examples
     ///
@@ -96,13 +128,39 @@ impl Gate {
     /// use std::sync::atomic::Ordering::Relaxed;
     /// ```
     #[inline]
-    pub fn permit(&self) -> Option<usize> {
-        let mut wait_queue_addr = 0;
-        let _prev = self.state.fetch_update(AcqRel, Acquire, |state| {
-            wait_queue_addr = state & WaitQueue::ADDR_MASK;
-            Some(state & WaitQueue::DATA_MASK)
-        });
-        None
+    pub fn permit(&self) -> Result<usize, State> {
+        let (state, count) = self.wake_all(None, None);
+        if state == State::Controlled {
+            Ok(count)
+        } else {
+            debug_assert_eq!(count, 0);
+            Err(state)
+        }
+    }
+
+    /// Rejects waiting tasks to enter the [`Gate`].
+    ///
+    /// Returns the number of permitted tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if the [`Gate`] is not in a [`Controlled`](State::Controlled) state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Gate;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    /// ```
+    #[inline]
+    pub fn reject(&self) -> Result<usize, State> {
+        let (state, count) = self.wake_all(None, Some(Error::Rejected));
+        if state == State::Controlled {
+            Ok(count)
+        } else {
+            debug_assert_eq!(count, 0);
+            Err(state)
+        }
     }
 
     /// Opens the [`Gate`] to allow any tasks to enter it.
@@ -113,12 +171,21 @@ impl Gate {
     ///
     /// ```
     /// use saa::Gate;
+    /// use saa::gate::State;
     /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let gate = Gate::default();
+    /// assert_eq!(gate.state(Relaxed), State::Controlled);
+    ///
+    /// let (prev_state, count) = gate.open();
+    ///
+    /// assert_eq!(prev_state, State::Controlled);
+    /// assert_eq!(count, 0);
+    /// assert_eq!(gate.state(Relaxed), State::Open);
     /// ```
     #[inline]
-    pub fn open(&self) -> Option<usize> {
-        let _prev = self.state.swap(u8::from(State::Open) as usize, AcqRel);
-        None
+    pub fn open(&self) -> (State, usize) {
+        self.wake_all(Some(State::Open), None)
     }
 
     /// Seals the [`Gate`] to clear the waiting tasks and disallow tasks to enter.
@@ -129,55 +196,62 @@ impl Gate {
     ///
     /// ```
     /// use saa::Gate;
+    /// use saa::gate::State;
     /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let (prev_state, count) = gate.seal();
+    ///
+    /// assert_eq!(prev_state, State::Controlled);
+    /// assert_eq!(count, 0);
+    /// assert_eq!(gate.state(Relaxed), State::Sealed);
     /// ```
     #[inline]
-    pub fn seal(&self) -> Option<usize> {
-        let _prev = self.state.swap(u8::from(State::Sealed) as usize, AcqRel);
-        None
-    }
-
-    /// Clears the [`Gate`] to get rid of the waiting tasks.
-    ///
-    /// Returns the number of tasks that were waiting to enter the gate.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use saa::Gate;
-    /// use std::sync::atomic::Ordering::Relaxed;
-    /// ```
-    #[inline]
-    pub fn clear(&self) -> Option<usize> {
-        None
+    pub fn seal(&self) -> (State, usize) {
+        self.wake_all(Some(State::Sealed), Some(Error::Sealed))
     }
 
     /// Enters the [`Gate`] asynchronously.
     ///
     /// Returns the number of tasks that were waiting to enter the gate.
     ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it failed to enter the [`Gate`].
+    ///
     /// # Examples
     ///
     /// ```
     /// use saa::Gate;
     /// ```
     #[inline]
-    pub async fn enter_async(&self) -> Result {
-        Result::Entered
+    pub async fn enter_async(&self) -> Result<State, Error> {
+        let mut pager = Pager::default();
+        let mut pinned_pager = Pin::new(&mut pager);
+        self.register_async(&mut pinned_pager);
+        pinned_pager.await
     }
 
     /// Enters the [`Gate`] synchronously.
     ///
     /// Returns the number of tasks that were waiting to enter the gate.
     ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it failed to enter the [`Gate`].
+    ///
     /// # Examples
     ///
     /// ```
     /// use saa::Gate;
     /// ```
     #[inline]
-    pub fn enter_sync(&self) -> Result {
-        Result::Entered
+    pub fn enter_sync(&self) -> Result<State, Error> {
+        let mut pager = Pager::default();
+        let mut pinned_pager = Pin::new(&mut pager);
+        self.register_sync(&mut pinned_pager);
+        pinned_pager.poll_sync()
     }
 
     /// Registers a [`Pager`] to allow it get a permit to enter the [`Gate`] remotely.
@@ -190,8 +264,103 @@ impl Gate {
     /// use saa::Gate;
     /// ```
     #[inline]
-    pub fn register(&self, _token: &Pin<&mut Pager>, _sync: bool) -> bool {
-        false
+    pub fn register_async<'g>(&'g self, pager: &mut Pin<&mut Pager<'g>>) -> bool {
+        if pager.entry.is_some() {
+            return false;
+        }
+        pager.entry.replace((
+            self,
+            WaitQueue::new_async(Opcode::Wait, Self::cleanup_wait_queue_entry, self.addr()),
+        ));
+        true
+    }
+
+    /// Registers a [`Pager`] to allow it get a permit to enter the [`Gate`] remotely.
+    ///
+    /// Returns `false` if the [`Pager`] was already registered.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Gate;
+    /// ```
+    #[inline]
+    pub fn register_sync<'g>(&'g self, pager: &mut Pin<&mut Pager<'g>>) -> bool {
+        if pager.entry.is_some() {
+            return false;
+        }
+        pager
+            .entry
+            .replace((self, WaitQueue::new_sync(Opcode::Wait)));
+        true
+    }
+
+    /// Wakes up all the waiting tasks and updates the state.
+    ///
+    /// Returns `(prev_state, count)` where `prev_state` is the previous state of the gate and
+    /// `count` is the number of tasks that were woken up.
+    fn wake_all(&self, next_state: Option<State>, error: Option<Error>) -> (State, usize) {
+        match self.state.fetch_update(AcqRel, Acquire, |value| {
+            if let Some(new_value) = next_state {
+                Some(u8::from(new_value) as usize)
+            } else {
+                Some(value & WaitQueue::DATA_MASK)
+            }
+        }) {
+            Ok(value) | Err(value) => {
+                let mut count = 0;
+                debug_assert_eq!(
+                    value & WaitQueue::DATA_MASK,
+                    u8::from(State::Controlled) as usize
+                );
+                let entry_addr = value & WaitQueue::ADDR_MASK;
+                let state = State::from(value & WaitQueue::DATA_MASK);
+                let result = Self::into_u8(state, error);
+                if entry_addr != 0 {
+                    WaitQueue::iter_forward(WaitQueue::addr_to_ptr(entry_addr), |entry, _| {
+                        entry.set_result(result);
+                        count += 1;
+                        false
+                    });
+                }
+                (state, count)
+            }
+        }
+    }
+
+    /// Cleans up the wait queue entry.
+    fn cleanup_wait_queue_entry(entry: &WaitQueue, self_addr: usize) {
+        let this: &Self = Self::self_ref(self_addr);
+        debug_assert!(!entry.is_sync());
+
+        this.wake_all(None, Some(Error::SpuriousFailure));
+        entry.acknowledge_result_sync();
+    }
+
+    /// Converts `(State, Error)` into `u8`.
+    fn into_u8(state: State, error: Option<Error>) -> u8 {
+        u8::from(state) | error.map_or(0_u8, u8::from)
+    }
+
+    /// Converts `(State, Error)` into `u8`.
+    fn from_u8(value: u8) -> (State, Option<Error>) {
+        let state = State::from(value & Self::STATE_MASK);
+        let error = value & !(Self::STATE_MASK);
+        if error != 0 {
+            (state, Some(Error::from(error)))
+        } else {
+            (state, None)
+        }
+    }
+}
+
+impl Drop for Gate {
+    #[inline]
+    fn drop(&mut self) {
+        if self.state.load(Relaxed) & WaitQueue::ADDR_MASK == 0 {
+            return;
+        }
+        self.seal();
     }
 }
 
@@ -211,7 +380,7 @@ impl From<State> for u8 {
     #[inline]
     fn from(value: State) -> Self {
         match value {
-            State::Closed => 0_u8,
+            State::Controlled => 0_u8,
             State::Sealed => 1_u8,
             State::Open => 2_u8,
         }
@@ -221,69 +390,119 @@ impl From<State> for u8 {
 impl From<u8> for State {
     #[inline]
     fn from(value: u8) -> Self {
+        State::from(value as usize)
+    }
+}
+
+impl From<usize> for State {
+    #[inline]
+    fn from(value: usize) -> Self {
         match value {
-            0_u8 => State::Closed,
-            1_u8 => State::Sealed,
+            0 => State::Controlled,
+            1 => State::Sealed,
             _ => State::Open,
         }
     }
 }
 
-impl From<Result> for u8 {
+impl From<Error> for u8 {
     #[inline]
-    fn from(value: Result) -> Self {
+    fn from(value: Error) -> Self {
         match value {
-            Result::Entered => 0_u8,
-            Result::Sealed => 1_u8,
-            Result::Cleared => 2_u8,
-            Result::Spurious => 3_u8,
+            Error::Rejected => 16_u8,
+            Error::Sealed => 17_u8,
+            Error::SpuriousFailure => 18_u8,
+            Error::NotRegistered => 19_u8,
+            Error::WrongMode => 20_u8,
+            Error::Unknown => 21_u8,
         }
     }
 }
 
-impl From<u8> for Result {
+impl From<u8> for Error {
     #[inline]
     fn from(value: u8) -> Self {
+        Error::from(value as usize)
+    }
+}
+
+impl From<usize> for Error {
+    #[inline]
+    fn from(value: usize) -> Self {
         match value {
-            0_u8 => Result::Entered,
-            1_u8 => Result::Sealed,
-            2_u8 => Result::Cleared,
-            _ => Result::Spurious,
+            16 => Error::Rejected,
+            17 => Error::Sealed,
+            18 => Error::SpuriousFailure,
+            19 => Error::NotRegistered,
+            20 => Error::WrongMode,
+            _ => Error::Unknown,
         }
     }
 }
 
-impl Pager {
+impl<'g> Pager<'g> {
+    /// Returns `true` if the [`Pager`] is registered in a [`Gate`].
+    #[inline]
+    pub fn is_registered(&self) -> bool {
+        self.entry.is_some()
+    }
+
+    /// Returns `true` if the [`Pager`] can only be polled synchronously.
+    #[inline]
+    pub fn is_sync(&self) -> bool {
+        self.entry
+            .as_ref()
+            .is_some_and(|(_, entry)| entry.is_sync())
+    }
+
     /// Waits for a permit to enter the [`Gate`].
-    pub fn poll(self: &mut Pin<&mut Pager>) -> Option<Result> {
-        let Some(wait_queue_entry) = self.wait_queue_entry.as_ref() else {
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it failed to enter the [`Gate`].
+    pub fn poll_sync(self: &mut Pin<&mut Pager<'g>>) -> Result<State, Error> {
+        let Some((_, entry)) = self.entry.as_ref() else {
             // The `Pager` is not registered in any `Gate`.
-            return None;
+            return Err(Error::NotRegistered);
         };
-        let result = wait_queue_entry.poll_result_sync();
-        if result == WaitQueue::INTERNAL_ERROR {
-            return None;
-        };
-        self.wait_queue_entry.take();
-        Some(Result::from(result))
+        let result = entry.poll_result_sync();
+        if result == WaitQueue::ERROR_WRONG_MODE {
+            return Err(Error::WrongMode);
+        }
+        self.entry.take();
+        let (state, error) = Gate::from_u8(result);
+        error.map_or(Ok(state), Err)
     }
 }
 
-impl Future for Pager {
-    type Output = Option<Result>;
+impl Drop for Pager<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some((gate, entry)) = self.entry.as_mut()
+            && entry.is_sync()
+        {
+            gate.wake_all(None, Some(Error::SpuriousFailure));
+            entry.poll_result_sync();
+        }
+    }
+}
+
+impl Future for Pager<'_> {
+    type Output = Result<State, Error>;
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some(wait_queue_entry) = self.wait_queue_entry.as_ref() else {
+        let Some((_, entry)) = self.entry.as_ref() else {
             // The `Pager` is not registered in any `Gate`.
-            return Poll::Ready(None);
+            return Poll::Ready(Err(Error::NotRegistered));
         };
-        if let Poll::Ready(result) = wait_queue_entry.poll_result_async(cx) {
-            self.wait_queue_entry.take();
-            if result == WaitQueue::INTERNAL_ERROR {
-                return Poll::Ready(None);
-            };
-            return Poll::Ready(Some(Result::from(result)));
+        if let Poll::Ready(result) = entry.poll_result_async(cx) {
+            self.entry.take();
+            if result == WaitQueue::ERROR_WRONG_MODE {
+                return Poll::Ready(Err(Error::WrongMode));
+            }
+            let (state, error) = Gate::from_u8(result);
+            return Poll::Ready(error.map_or(Ok(state), Err));
         }
         Poll::Pending
     }

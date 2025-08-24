@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
-use crate::{Lock, Semaphore};
+use crate::{Gate, Lock, Semaphore};
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
@@ -180,6 +180,24 @@ fn semaphore_sync() {
         thread.join().unwrap();
     }
     assert_eq!(check.load(Relaxed), 0);
+}
+
+#[test] // TODO.
+fn gate_spurious_wakeup() {
+    let gate = Arc::new(Gate::default());
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let gate = gate.clone();
+        threads.push(thread::spawn(move || {
+            drop(gate);
+        }));
+    }
+
+    thread::sleep(Duration::from_micros(1));
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
 }
 
 #[test]

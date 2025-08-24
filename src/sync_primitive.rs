@@ -22,9 +22,15 @@ pub(crate) trait SyncPrimitive: Sized {
     fn max_shared_owners() -> usize;
 
     /// Converts a reference to `Self` into a memory address.
-    fn self_addr(&self) -> usize {
+    fn addr(&self) -> usize {
         let self_ptr: *const Self = addr_of!(*self);
         self_ptr.expose_provenance()
+    }
+
+    /// Converts a memory address back to a reference to `Self`.
+    fn self_ref(addr: usize) -> &'static Self {
+        let this: &Self = unsafe { &*with_exposed_provenance(addr) };
+        this
     }
 
     /// Tries to push a wait queue entry into the wait queue.
@@ -48,8 +54,7 @@ pub(crate) trait SyncPrimitive: Sized {
             return false;
         }
 
-        let async_wait =
-            WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.self_addr());
+        let async_wait = WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.addr());
         let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
         debug_assert_eq!(
             addr_of!(async_wait),
@@ -367,8 +372,7 @@ pub(crate) trait SyncPrimitive: Sized {
     #[cfg(test)]
     fn test_drop_wait_queue_entry(&self, mode: Opcode) {
         let state = self.state().load(Acquire);
-        let async_wait =
-            WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.self_addr());
+        let async_wait = WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.addr());
         let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
         debug_assert_eq!(
             addr_of!(async_wait),

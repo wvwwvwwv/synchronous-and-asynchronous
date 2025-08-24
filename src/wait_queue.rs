@@ -79,8 +79,8 @@ enum Monitor {
 }
 
 impl WaitQueue {
-    /// Reserved value for [`WaitQueue`] internal errors.
-    pub(crate) const INTERNAL_ERROR: u8 = u8::MAX;
+    /// The wrong mode of [`WaitQueue`] method is used.
+    pub(crate) const ERROR_WRONG_MODE: u8 = u8::MAX;
 
     /// Indicates that the wait queue is being processed by a thread.
     pub(crate) const LOCKED_FLAG: usize = align_of::<Self>() >> 1;
@@ -230,6 +230,11 @@ impl WaitQueue {
         }
     }
 
+    /// Returns `true` if it contains a synchronous context.
+    pub(crate) fn is_sync(&self) -> bool {
+        matches!(self.monitor, Monitor::Sync(_))
+    }
+
     /// Sets the result to the entry.
     pub(crate) fn set_result(&self, result: u8) {
         debug_assert!(!self.finalized.load(Relaxed));
@@ -260,8 +265,7 @@ impl WaitQueue {
     /// Polls the result, asynchronously.
     pub(crate) fn poll_result_async(&self, cx: &mut Context<'_>) -> Poll<u8> {
         let Monitor::Async(async_context) = &self.monitor else {
-            debug_assert!(false, "Logic error");
-            return Poll::Ready(Self::INTERNAL_ERROR);
+            return Poll::Ready(Self::ERROR_WRONG_MODE);
         };
 
         if let Some(result) = self.try_acknowledge_result() {
@@ -293,8 +297,7 @@ impl WaitQueue {
     /// Polls the result, synchronously.
     pub(crate) fn poll_result_sync(&self) -> u8 {
         let Monitor::Sync(sync_context) = &self.monitor else {
-            debug_assert!(false, "Logic error");
-            return Self::INTERNAL_ERROR;
+            return Self::ERROR_WRONG_MODE;
         };
 
         loop {
@@ -338,6 +341,16 @@ impl WaitQueue {
     }
 
     /// Tries to get the result and acknowledges it.
+    pub(crate) fn acknowledge_result_sync(&self) -> u8 {
+        loop {
+            if let Some(result) = self.try_acknowledge_result() {
+                return result;
+            }
+            yield_now();
+        }
+    }
+
+    /// Tries to get the result and acknowledges it.
     fn try_acknowledge_result(&self) -> Option<u8> {
         self.finalized.load(Acquire).then(|| {
             debug_assert!(self.ready.load(Relaxed));
@@ -368,9 +381,3 @@ impl Future for PinnedWaitQueue<'_> {
         this.0.poll_result_async(cx)
     }
 }
-
-/// SAFETY: `UnsafeCell<Option<Thread>>` can be sent.
-unsafe impl Sync for SyncContext {}
-
-/// SAFETY: `UnsafeCell<Option<Waker>>` can be sent.
-unsafe impl Sync for AsyncContext {}
