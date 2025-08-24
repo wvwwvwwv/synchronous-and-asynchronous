@@ -246,9 +246,9 @@ async fn lock_chaos() {
         } else {
             threads.push(thread::spawn(move || {
                 for j in 0..num_iters {
-                    if j % 17 == 1 {
+                    if j % 11 == 1 {
                         lock.test_drop_wait_queue_entry(Opcode::Exclusive);
-                    } else if j % 11 == 0 {
+                    } else if j % 7 == 0 {
                         lock.lock_sync();
                         assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
                         check.fetch_sub(usize::MAX, Relaxed);
@@ -299,7 +299,7 @@ async fn semaphore_chaos() {
         } else {
             threads.push(thread::spawn(move || {
                 for j in 0..num_iters {
-                    if j % 19 == 1 {
+                    if j % 11 == 1 {
                         semaphore.test_drop_wait_queue_entry(Opcode::Semaphore(19));
                     } else {
                         semaphore.acquire_many_sync(i + 1);

@@ -220,6 +220,7 @@ pub(crate) trait SyncPrimitive: Sized {
                     .state()
                     .fetch_update(AcqRel, Acquire, |new_state| {
                         let new_data = new_state & WaitQueue::DATA_MASK;
+                        debug_assert!(new_data <= data);
                         debug_assert!(new_data + transferred <= WaitQueue::DATA_MASK);
 
                         if new_state == state || new_data == data {
@@ -268,8 +269,8 @@ pub(crate) trait SyncPrimitive: Sized {
                     if let Some(prev_entry) = unsafe { entry.prev_entry_ptr().as_ref() } {
                         prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
                         result = Ok((state, true));
-                    } else {
-                        let next_entry_ptr = next_entry.map_or(null(), WaitQueue::ref_to_ptr);
+                    } else if let Some(next_entry) = next_entry {
+                        let next_entry_ptr = WaitQueue::ref_to_ptr(next_entry);
                         debug_assert_eq!(next_entry_ptr.addr() & (!WaitQueue::ADDR_MASK), 0);
 
                         let next_state =
@@ -279,6 +280,16 @@ pub(crate) trait SyncPrimitive: Sized {
                             WaitQueue::LOCKED_FLAG
                         );
 
+                        match self
+                            .state()
+                            .compare_exchange(state, next_state, AcqRel, Acquire)
+                        {
+                            Ok(_) => result = Ok((next_state, true)),
+                            Err(new_state) => result = Err(new_state),
+                        }
+                    } else {
+                        // Reset the wait queue and unlock.
+                        let next_state = state & WaitQueue::DATA_MASK;
                         match self
                             .state()
                             .compare_exchange(state, next_state, AcqRel, Acquire)
@@ -333,7 +344,10 @@ pub(crate) trait SyncPrimitive: Sized {
 
         if state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
             let (new_state, removed) = this.remove_wait_queue_entry(state, wait_queue_addr);
-            this.process_wait_queue(new_state);
+            if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
+                // Need to process the wait queue if it is still locked.
+                this.process_wait_queue(new_state);
+            }
 
             if !removed {
                 need_completion = true;

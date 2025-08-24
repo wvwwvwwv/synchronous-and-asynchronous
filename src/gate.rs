@@ -6,7 +6,7 @@
 use std::pin::Pin;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{self, AcqRel};
+use std::sync::atomic::Ordering::{self, AcqRel, Acquire};
 use std::task::{Context, Poll};
 
 #[cfg(feature = "loom")]
@@ -83,6 +83,26 @@ impl Gate {
     #[inline]
     pub fn reset(&self) {
         let _prev = self.state.swap(u8::from(State::Closed) as usize, AcqRel);
+    }
+
+    /// Permits waiting tasks to enter the [`Gate`].
+    ///
+    /// Returns the number of permitted tasks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Gate;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    /// ```
+    #[inline]
+    pub fn permit(&self) -> Option<usize> {
+        let mut wait_queue_addr = 0;
+        let _prev = self.state.fetch_update(AcqRel, Acquire, |state| {
+            wait_queue_addr = state & WaitQueue::ADDR_MASK;
+            Some(state & WaitQueue::DATA_MASK)
+        });
+        None
     }
 
     /// Opens the [`Gate`] to allow any tasks to enter it.
@@ -170,7 +190,7 @@ impl Gate {
     /// use saa::Gate;
     /// ```
     #[inline]
-    pub fn register(&self, _token: &Pin<&mut Pager>) -> bool {
+    pub fn register(&self, _token: &Pin<&mut Pager>, _sync: bool) -> bool {
         false
     }
 }
@@ -240,9 +260,9 @@ impl Pager {
             // The `Pager` is not registered in any `Gate`.
             return None;
         };
-        let mut result = wait_queue_entry.poll_result_sync();
+        let result = wait_queue_entry.poll_result_sync();
         if result == WaitQueue::INTERNAL_ERROR {
-            result = u8::from(Result::Spurious);
+            return None;
         };
         self.wait_queue_entry.take();
         Some(Result::from(result))
@@ -258,10 +278,10 @@ impl Future for Pager {
             // The `Pager` is not registered in any `Gate`.
             return Poll::Ready(None);
         };
-        if let Poll::Ready(mut result) = wait_queue_entry.poll_result_async(cx) {
+        if let Poll::Ready(result) = wait_queue_entry.poll_result_async(cx) {
             self.wait_queue_entry.take();
             if result == WaitQueue::INTERNAL_ERROR {
-                result = u8::from(Result::Spurious);
+                return Poll::Ready(None);
             };
             return Poll::Ready(Some(Result::from(result)));
         }
