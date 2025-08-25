@@ -235,7 +235,7 @@ fn drop_future() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn lock_chaos() {
     let num_tasks = Lock::MAX_SHARED_OWNERS;
-    let num_iters = 256;
+    let num_iters = 2048;
 
     let lock = Arc::new(Lock::default());
     let check = Arc::new(AtomicUsize::new(0));
@@ -264,9 +264,9 @@ async fn lock_chaos() {
         } else {
             threads.push(thread::spawn(move || {
                 for j in 0..num_iters {
-                    if j % 11 == 1 {
+                    if j % 7 == 3 {
                         lock.test_drop_wait_queue_entry(Opcode::Exclusive);
-                    } else if j % 7 == 0 {
+                    } else if j % 11 == 0 {
                         lock.lock_sync();
                         assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
                         check.fetch_sub(usize::MAX, Relaxed);
@@ -295,7 +295,7 @@ async fn lock_chaos() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn semaphore_chaos() {
     let num_tasks = Semaphore::MAX_PERMITS;
-    let num_iters = 256;
+    let num_iters = 2048;
 
     let semaphore = Arc::new(Semaphore::default());
     let check = Arc::new(AtomicUsize::new(0));
@@ -317,8 +317,8 @@ async fn semaphore_chaos() {
         } else {
             threads.push(thread::spawn(move || {
                 for j in 0..num_iters {
-                    if j % 11 == 1 {
-                        semaphore.test_drop_wait_queue_entry(Opcode::Semaphore(19));
+                    if j % 7 == 1 {
+                        semaphore.test_drop_wait_queue_entry(Opcode::Semaphore(27));
                     } else {
                         semaphore.acquire_many_sync(i + 1);
                         assert!(check.fetch_add(i + 1, Relaxed) + i < Semaphore::MAX_PERMITS);

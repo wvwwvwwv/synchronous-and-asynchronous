@@ -166,10 +166,8 @@ pub(crate) trait SyncPrimitive: Sized {
             let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
             if head_entry_ptr.is_null() {
                 WaitQueue::iter_forward(tail_entry_ptr, |entry, next_entry| {
-                    if next_entry.is_none() {
-                        head_entry_ptr = WaitQueue::ref_to_ptr(entry);
-                    }
-                    false
+                    head_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                    next_entry.is_none()
                 });
             } else {
                 WaitQueue::install_backward_link(tail_entry_ptr);
@@ -186,7 +184,11 @@ pub(crate) trait SyncPrimitive: Sized {
                     || data + transferred + desired <= Self::max_shared_owners()
                 {
                     // The entry can inherit ownerhip.
-                    if prev_entry.is_none() {
+                    if prev_entry.is_some() {
+                        transferred += desired;
+                        resolved_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                        false
+                    } else {
                         // This is the tail of the wait queue: try to reset.
                         debug_assert_eq!(tail_entry_ptr, addr_of!(*entry));
                         if self
@@ -203,11 +205,9 @@ pub(crate) trait SyncPrimitive: Sized {
 
                         // The wait queue was reset.
                         unlocked = true;
+                        resolved_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                        true
                     }
-
-                    resolved_entry_ptr = WaitQueue::ref_to_ptr(entry);
-                    transferred += desired;
-                    unlocked
                 } else {
                     // Unlink those that have succeeded in acquiring shared ownership.
                     entry.update_next_entry_ptr(null());
@@ -215,38 +215,31 @@ pub(crate) trait SyncPrimitive: Sized {
                     true
                 }
             });
-            debug_assert_eq!(resolved_entry_ptr.is_null(), transferred == 0);
+            debug_assert!(!reset_failed || !unlocked);
 
-            if reset_failed {
-                debug_assert!(!unlocked);
-                state = self.state().fetch_add(transferred, Release) + transferred;
-            } else if !unlocked {
-                if self
+            if !reset_failed && !unlocked {
+                unlocked = self
                     .state()
                     .fetch_update(AcqRel, Acquire, |new_state| {
                         let new_data = new_state & WaitQueue::DATA_MASK;
                         debug_assert!(new_data <= data);
                         debug_assert!(new_data + transferred <= WaitQueue::DATA_MASK);
 
-                        if new_state == state || new_data == data {
-                            let next_state =
-                                (new_state & WaitQueue::ADDR_MASK) | (new_data + transferred);
-                            Some(next_state)
+                        if new_data == data {
+                            Some((new_state & WaitQueue::ADDR_MASK) | (new_data + transferred))
                         } else {
                             None
                         }
                     })
-                    .is_err()
-                {
-                    state = self.state().fetch_add(transferred, Release) + transferred;
-                } else {
-                    unlocked = true;
-                }
+                    .is_ok();
+            }
+
+            if !unlocked {
+                state = self.state().fetch_add(transferred, AcqRel) + transferred;
             }
 
             WaitQueue::iter_forward(resolved_entry_ptr, |entry, _next_entry| {
                 entry.set_result(0);
-                // The lock can be released here.
                 false
             });
         }
@@ -268,12 +261,13 @@ pub(crate) trait SyncPrimitive: Sized {
             let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
             WaitQueue::iter_forward(tail_entry_ptr, |entry, next_entry| {
                 if WaitQueue::ref_to_ptr(entry) == target_ptr {
+                    let prev_entry_ptr = entry.prev_entry_ptr();
                     if let Some(next_entry) = next_entry {
-                        next_entry.update_prev_entry_ptr(entry.prev_entry_ptr());
+                        next_entry.update_prev_entry_ptr(prev_entry_ptr);
                     }
-                    if let Some(prev_entry) = unsafe { entry.prev_entry_ptr().as_ref() } {
+                    result = if let Some(prev_entry) = unsafe { prev_entry_ptr.as_ref() } {
                         prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
-                        result = Ok((state, true));
+                        Ok((state, true))
                     } else if let Some(next_entry) = next_entry {
                         let next_entry_ptr = WaitQueue::ref_to_ptr(next_entry);
                         debug_assert_eq!(next_entry_ptr.addr() & (!WaitQueue::ADDR_MASK), 0);
@@ -285,24 +279,16 @@ pub(crate) trait SyncPrimitive: Sized {
                             WaitQueue::LOCKED_FLAG
                         );
 
-                        match self
-                            .state()
+                        self.state()
                             .compare_exchange(state, next_state, AcqRel, Acquire)
-                        {
-                            Ok(_) => result = Ok((next_state, true)),
-                            Err(new_state) => result = Err(new_state),
-                        }
+                            .map(|_| (next_state, true))
                     } else {
                         // Reset the wait queue and unlock.
                         let next_state = state & WaitQueue::DATA_MASK;
-                        match self
-                            .state()
+                        self.state()
                             .compare_exchange(state, next_state, AcqRel, Acquire)
-                        {
-                            Ok(_) => result = Ok((next_state, true)),
-                            Err(new_state) => result = Err(new_state),
-                        }
-                    }
+                            .map(|_| (next_state, true))
+                    };
                     true
                 } else {
                     false

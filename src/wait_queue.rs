@@ -282,6 +282,12 @@ impl WaitQueue {
             if !self.ready.load(Acquire) {
                 *waker = this_waker.take();
             }
+            drop(waker);
+
+            if self.ready.load(Acquire) {
+                // The result may have been set while the lock was held.
+                cx.waker().wake_by_ref();
+            }
         }
 
         if let Some(result) = self.try_acknowledge_result() {

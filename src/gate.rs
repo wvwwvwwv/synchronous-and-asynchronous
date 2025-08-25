@@ -24,6 +24,13 @@ pub struct Gate {
     state: AtomicUsize,
 }
 
+/// Tasks holding a [`Pager`] can remotely get a permit to enter the [`Gate`].
+#[derive(Debug, Default)]
+pub struct Pager<'g> {
+    /// The [`Gate`] that the [`Pager`] is registered in and the wait queue entry for the [`Pager`].
+    entry: Option<(&'g Gate, WaitQueue)>,
+}
+
 /// The state of a [`Gate`].
 ///
 /// [`Gate`] can be in one of three states.
@@ -62,13 +69,6 @@ pub enum Error {
     WrongMode = 20_u8,
     /// Unknown error.
     Unknown = 21_u8,
-}
-
-/// Tasks holding a [`Pager`] can remotely get a permit to enter the [`Gate`].
-#[derive(Debug, Default)]
-pub struct Pager<'g> {
-    /// The [`Gate`] that the [`Pager`] is registered in and the wait queue entry for the [`Pager`].
-    entry: Option<(&'g Gate, WaitQueue)>,
 }
 
 impl Gate {
@@ -294,6 +294,31 @@ impl Gate {
     ///
     /// ```
     /// use saa::Gate;
+    /// use saa::gate::State;
+    /// use std::sync::Arc;
+    /// use std::thread;
+    ///
+    /// let gate = Arc::new(Gate::default());
+    ///
+    /// let gate_clone = gate.clone();
+    /// let thread_1 = thread::spawn(move || {
+    ///     assert_eq!(gate_clone.enter_sync(), Ok(State::Controlled));
+    /// });
+    ///
+    /// let gate_clone = gate.clone();
+    /// let thread_2 = thread::spawn(move || {
+    ///     assert_eq!(gate_clone.enter_sync(), Ok(State::Controlled));
+    /// });
+    ///
+    /// let mut cnt = 0;
+    /// while cnt != 2 {
+    ///     if let Ok(n) = gate.permit() {
+    ///         cnt += n;
+    ///     }
+    /// }
+    ///
+    /// thread_1.join().unwrap();
+    /// thread_2.join().unwrap();
     /// ```
     #[inline]
     pub fn enter_sync(&self) -> Result<State, Error> {
@@ -437,6 +462,75 @@ impl SyncPrimitive for Gate {
     }
 }
 
+impl<'g> Pager<'g> {
+    /// Returns `true` if the [`Pager`] is registered in a [`Gate`].
+    #[inline]
+    pub fn is_registered(&self) -> bool {
+        self.entry.is_some()
+    }
+
+    /// Returns `true` if the [`Pager`] can only be polled synchronously.
+    #[inline]
+    pub fn is_sync(&self) -> bool {
+        self.entry
+            .as_ref()
+            .is_some_and(|(_, entry)| entry.is_sync())
+    }
+
+    /// Waits for a permit to enter the [`Gate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it failed to enter the [`Gate`].
+    pub fn poll_sync(self: &mut Pin<&mut Pager<'g>>) -> Result<State, Error> {
+        let Some((_, entry)) = self.entry.as_ref() else {
+            // The `Pager` is not registered in any `Gate`.
+            return Err(Error::NotRegistered);
+        };
+        let result = entry.poll_result_sync();
+        if result == WaitQueue::ERROR_WRONG_MODE {
+            return Err(Error::WrongMode);
+        }
+        self.entry.take();
+        let (state, error) = Gate::from_u8(result);
+        error.map_or(Ok(state), Err)
+    }
+}
+
+impl Drop for Pager<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        let Some((gate, entry)) = self.entry.as_mut() else {
+            return;
+        };
+        if entry.is_sync() {
+            gate.wake_all(None, Some(Error::SpuriousFailure));
+            entry.poll_result_sync();
+        }
+    }
+}
+
+impl Future for Pager<'_> {
+    type Output = Result<State, Error>;
+
+    #[inline]
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let Some((_, entry)) = self.entry.as_ref() else {
+            // The `Pager` is not registered in any `Gate`.
+            return Poll::Ready(Err(Error::NotRegistered));
+        };
+        if let Poll::Ready(result) = entry.poll_result_async(cx) {
+            self.entry.take();
+            if result == WaitQueue::ERROR_WRONG_MODE {
+                return Poll::Ready(Err(Error::WrongMode));
+            }
+            let (state, error) = Gate::from_u8(result);
+            return Poll::Ready(error.map_or(Ok(state), Err));
+        }
+        Poll::Pending
+    }
+}
+
 impl From<State> for u8 {
     #[inline]
     fn from(value: State) -> Self {
@@ -498,73 +592,5 @@ impl From<usize> for Error {
             20 => Error::WrongMode,
             _ => Error::Unknown,
         }
-    }
-}
-
-impl<'g> Pager<'g> {
-    /// Returns `true` if the [`Pager`] is registered in a [`Gate`].
-    #[inline]
-    pub fn is_registered(&self) -> bool {
-        self.entry.is_some()
-    }
-
-    /// Returns `true` if the [`Pager`] can only be polled synchronously.
-    #[inline]
-    pub fn is_sync(&self) -> bool {
-        self.entry
-            .as_ref()
-            .is_some_and(|(_, entry)| entry.is_sync())
-    }
-
-    /// Waits for a permit to enter the [`Gate`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if it failed to enter the [`Gate`].
-    pub fn poll_sync(self: &mut Pin<&mut Pager<'g>>) -> Result<State, Error> {
-        let Some((_, entry)) = self.entry.as_ref() else {
-            // The `Pager` is not registered in any `Gate`.
-            return Err(Error::NotRegistered);
-        };
-        let result = entry.poll_result_sync();
-        if result == WaitQueue::ERROR_WRONG_MODE {
-            return Err(Error::WrongMode);
-        }
-        self.entry.take();
-        let (state, error) = Gate::from_u8(result);
-        error.map_or(Ok(state), Err)
-    }
-}
-
-impl Drop for Pager<'_> {
-    #[inline]
-    fn drop(&mut self) {
-        if let Some((gate, entry)) = self.entry.as_mut()
-            && entry.is_sync()
-        {
-            gate.wake_all(None, Some(Error::SpuriousFailure));
-            entry.poll_result_sync();
-        }
-    }
-}
-
-impl Future for Pager<'_> {
-    type Output = Result<State, Error>;
-
-    #[inline]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some((_, entry)) = self.entry.as_ref() else {
-            // The `Pager` is not registered in any `Gate`.
-            return Poll::Ready(Err(Error::NotRegistered));
-        };
-        if let Poll::Ready(result) = entry.poll_result_async(cx) {
-            self.entry.take();
-            if result == WaitQueue::ERROR_WRONG_MODE {
-                return Poll::Ready(Err(Error::WrongMode));
-            }
-            let (state, error) = Gate::from_u8(result);
-            return Poll::Ready(error.map_or(Ok(state), Err));
-        }
-        Poll::Pending
     }
 }
