@@ -80,9 +80,10 @@ impl Gate {
     /// # Examples
     ///
     /// ```
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
     /// use saa::Gate;
     /// use saa::gate::State;
-    /// use std::sync::atomic::Ordering::Relaxed;
     ///
     /// let gate = Gate::default();
     ///
@@ -137,10 +138,11 @@ impl Gate {
     /// # Examples
     ///
     /// ```
-    /// use saa::Gate;
-    /// use saa::gate::State;
     /// use std::sync::Arc;
     /// use std::thread;
+    ///
+    /// use saa::Gate;
+    /// use saa::gate::State;
     ///
     /// let gate = Arc::new(Gate::default());
     ///
@@ -180,10 +182,11 @@ impl Gate {
     /// # Examples
     ///
     /// ```
-    /// use saa::Gate;
-    /// use saa::gate::Error;
     /// use std::sync::Arc;
     /// use std::thread;
+    ///
+    /// use saa::Gate;
+    /// use saa::gate::Error;
     ///
     /// let gate = Arc::new(Gate::default());
     ///
@@ -219,9 +222,10 @@ impl Gate {
     /// # Examples
     ///
     /// ```
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
     /// use saa::Gate;
     /// use saa::gate::State;
-    /// use std::sync::atomic::Ordering::Relaxed;
     ///
     /// let gate = Gate::default();
     /// assert_eq!(gate.state(Relaxed), State::Controlled);
@@ -244,9 +248,10 @@ impl Gate {
     /// # Examples
     ///
     /// ```
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
     /// use saa::Gate;
     /// use saa::gate::State;
-    /// use std::sync::atomic::Ordering::Relaxed;
     ///
     /// let gate = Gate::default();
     ///
@@ -293,10 +298,11 @@ impl Gate {
     /// # Examples
     ///
     /// ```
-    /// use saa::Gate;
-    /// use saa::gate::State;
     /// use std::sync::Arc;
     /// use std::thread;
+    ///
+    /// use saa::Gate;
+    /// use saa::gate::State;
     ///
     /// let gate = Arc::new(Gate::default());
     ///
@@ -357,7 +363,29 @@ impl Gate {
     /// # Examples
     ///
     /// ```
+    /// use std::pin::Pin;
+    /// use std::sync::Arc;
+    /// use std::thread;
+    ///
     /// use saa::Gate;
+    /// use saa::gate::{Pager, State};
+    ///
+    /// let gate = Arc::new(Gate::default());
+    ///
+    /// let mut pager = Pager::default();
+    /// let mut pinned_pager = Pin::new(&mut pager);
+    ///
+    /// assert!(gate.register_sync(&mut pinned_pager));
+    /// assert!(!gate.register_sync(&mut pinned_pager));
+    ///
+    /// let gate_clone = gate.clone();
+    /// let thread = thread::spawn(move || {
+    ///     assert_eq!(gate_clone.permit(), Ok(1));
+    /// });
+    ///
+    /// thread.join().unwrap();
+    ///
+    /// assert_eq!(pinned_pager.poll_sync(), Ok(State::Controlled));
     /// ```
     #[inline]
     pub fn register_sync<'g>(&'g self, pager: &mut Pin<&mut Pager<'g>>) -> bool {
@@ -386,8 +414,9 @@ impl Gate {
             Ok(value) | Err(value) => {
                 let mut count = 0;
                 let entry_addr = value & WaitQueue::ADDR_MASK;
-                let state = State::from(value & WaitQueue::DATA_MASK);
-                let result = Self::into_u8(state, error);
+                let prev_state = State::from(value & WaitQueue::DATA_MASK);
+                let next_state = next_state.unwrap_or(prev_state);
+                let result = Self::into_u8(next_state, error);
                 if entry_addr != 0 {
                     WaitQueue::iter_forward(WaitQueue::addr_to_ptr(entry_addr), |entry, _| {
                         entry.set_result(result);
@@ -395,7 +424,7 @@ impl Gate {
                         false
                     });
                 }
-                (state, count)
+                (prev_state, count)
             }
         }
     }
@@ -464,12 +493,56 @@ impl SyncPrimitive for Gate {
 
 impl<'g> Pager<'g> {
     /// Returns `true` if the [`Pager`] is registered in a [`Gate`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::pin::Pin;
+    ///
+    /// use saa::Gate;
+    /// use saa::gate::{Pager, State};
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let mut pager = Pager::default();
+    ///
+    ///
+    /// let mut pinned_pager = Pin::new(&mut pager);
+    /// assert!(!pinned_pager.is_registered());
+    ///
+    /// assert!(gate.register_sync(&mut pinned_pager));
+    /// assert!(pinned_pager.is_registered());
+    ///
+    /// assert_eq!(gate.open().1, 1);
+    /// ```
     #[inline]
     pub fn is_registered(&self) -> bool {
         self.entry.is_some()
     }
 
     /// Returns `true` if the [`Pager`] can only be polled synchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::pin::Pin;
+    ///
+    /// use saa::Gate;
+    /// use saa::gate::{Pager, State};
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let mut pager = Pager::default();
+    /// let mut pinned_pager = Pin::new(&mut pager);
+    ///
+    /// assert!(gate.register_sync(&mut pinned_pager));
+    /// assert!(pinned_pager.is_sync());
+    ///
+    /// assert_eq!(gate.open().1, 1);
+    ///
+    /// assert_eq!(pinned_pager.poll_sync(), Ok(State::Open));
+    /// assert!(!pinned_pager.is_sync());
+    /// ```
     #[inline]
     pub fn is_sync(&self) -> bool {
         self.entry
@@ -482,6 +555,26 @@ impl<'g> Pager<'g> {
     /// # Errors
     ///
     /// Returns an [`Error`] if it failed to enter the [`Gate`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::pin::Pin;
+    ///
+    /// use saa::Gate;
+    /// use saa::gate::{Pager, State};
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let mut pager = Pager::default();
+    /// let mut pinned_pager = Pin::new(&mut pager);
+    ///
+    /// assert!(gate.register_sync(&mut pinned_pager));
+    ///
+    /// assert_eq!(gate.open().1, 1);
+    ///
+    /// assert_eq!(pinned_pager.poll_sync(), Ok(State::Open));
+    /// ```
     pub fn poll_sync(self: &mut Pin<&mut Pager<'g>>) -> Result<State, Error> {
         let Some((_, entry)) = self.entry.as_ref() else {
             // The `Pager` is not registered in any `Gate`.

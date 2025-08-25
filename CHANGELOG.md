@@ -1,8 +1,9 @@
 # Changelog
 
-2.0.0 (WIP)
+1.1.0
 
-* `saa::Gate`.
+* Fix a hang issue when an asynchronous task is dropped before completion.
+* Work-in-progress: `saa::Gate`.
 
 1.0.1
 
