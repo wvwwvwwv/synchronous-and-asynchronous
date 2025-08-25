@@ -97,6 +97,19 @@ impl Gate {
     /// state.
     ///
     /// Returns the previous state of the [`Gate`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Gate;
+    /// use saa::gate::State;
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// gate.seal();
+    ///
+    /// assert_eq!(gate.reset(), Some(State::Sealed));
+    /// ```
     #[inline]
     pub fn reset(&self) -> Option<State> {
         match self.state.fetch_update(Relaxed, Relaxed, |value| {
@@ -125,7 +138,25 @@ impl Gate {
     ///
     /// ```
     /// use saa::Gate;
-    /// use std::sync::atomic::Ordering::Relaxed;
+    /// use saa::gate::State;
+    /// use std::sync::Arc;
+    /// use std::thread;
+    ///
+    /// let gate = Arc::new(Gate::default());
+    ///
+    /// let gate_clone = gate.clone();
+    ///
+    /// let thread = thread::spawn(move || {
+    ///     assert_eq!(gate_clone.enter_sync(), Ok(State::Controlled));
+    /// });
+    ///
+    /// loop {
+    ///     if gate.permit() == Ok(1) {
+    ///         break;
+    ///     }
+    /// }
+    ///
+    /// thread.join().unwrap();
     /// ```
     #[inline]
     pub fn permit(&self) -> Result<usize, State> {
@@ -150,7 +181,25 @@ impl Gate {
     ///
     /// ```
     /// use saa::Gate;
-    /// use std::sync::atomic::Ordering::Relaxed;
+    /// use saa::gate::Error;
+    /// use std::sync::Arc;
+    /// use std::thread;
+    ///
+    /// let gate = Arc::new(Gate::default());
+    ///
+    /// let gate_clone = gate.clone();
+    ///
+    /// let thread = thread::spawn(move || {
+    ///     assert_eq!(gate_clone.enter_sync(), Err(Error::Rejected));
+    /// });
+    ///
+    /// loop {
+    ///     if gate.reject() == Ok(1) {
+    ///         break;
+    ///     }
+    /// }
+    ///
+    /// thread.join().unwrap();
     /// ```
     #[inline]
     pub fn reject(&self) -> Result<usize, State> {
@@ -272,6 +321,7 @@ impl Gate {
             self,
             WaitQueue::new_async(Opcode::Wait, Self::cleanup_wait_queue_entry, self.addr()),
         ));
+        self.push_wait_queue_entry(pager);
         true
     }
 
@@ -292,6 +342,7 @@ impl Gate {
         pager
             .entry
             .replace((self, WaitQueue::new_sync(Opcode::Wait)));
+        self.push_wait_queue_entry(pager);
         true
     }
 
@@ -309,10 +360,6 @@ impl Gate {
         }) {
             Ok(value) | Err(value) => {
                 let mut count = 0;
-                debug_assert_eq!(
-                    value & WaitQueue::DATA_MASK,
-                    u8::from(State::Controlled) as usize
-                );
                 let entry_addr = value & WaitQueue::ADDR_MASK;
                 let state = State::from(value & WaitQueue::DATA_MASK);
                 let result = Self::into_u8(state, error);
@@ -324,6 +371,20 @@ impl Gate {
                     });
                 }
                 (state, count)
+            }
+        }
+    }
+
+    /// Pushes the wait queue entry.
+    fn push_wait_queue_entry(&self, entry: &mut Pin<&mut Pager>) {
+        if let Some((_, entry)) = entry.entry.as_ref() {
+            let pinned_entry = Pin::new(entry);
+            let mut state = self.state.load(Relaxed);
+            while (state & WaitQueue::DATA_MASK) == u8::from(State::Controlled) as usize {
+                if self.try_push_wait_queue_entry(pinned_entry, state) {
+                    return;
+                }
+                state = self.state.load(Relaxed);
             }
         }
     }
