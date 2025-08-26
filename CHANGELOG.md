@@ -1,5 +1,9 @@
 # Changelog
 
+2.1.0
+
+* (WIP) Add a poisoned state to `saa::Lock`.
+
 2.0.0
 
 * New synchronization primitive: `saa::Gate`.

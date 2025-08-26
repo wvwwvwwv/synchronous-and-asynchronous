@@ -107,15 +107,31 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async(&self) {
-        loop {
-            let (result, state) = self.try_acquire_internal(1);
-            if result {
-                return;
-            }
-            if self.wait_resources_async(state, Opcode::Semaphore(1)).await {
-                return;
-            }
-        }
+        self.acquire_many_async_with(1, || ()).await;
+    }
+
+    /// Gets a permit from the semaphore asynchronously with a wait callback provided.
+    ///
+    /// The callback is invoked when the task starts waiting for a permit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// async {
+    ///     let mut wait = false;
+    ///     semaphore.acquire_async_with(|| { wait = true; }).await;
+    ///     assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    ///     assert!(!wait);
+    /// };
+    /// ```
+    #[inline]
+    pub async fn acquire_async_with<F: FnOnce()>(&self, wait_callback: F) {
+        self.acquire_many_async_with(1, wait_callback).await;
     }
 
     /// Gets a permit from the semaphore synchronously.
@@ -133,15 +149,29 @@ impl Semaphore {
     /// ```
     #[inline]
     pub fn acquire_sync(&self) {
-        loop {
-            let (result, state) = self.try_acquire_internal(1);
-            if result {
-                return;
-            }
-            if self.wait_resources_sync(state, Opcode::Semaphore(1)) {
-                return;
-            }
-        }
+        self.acquire_many_sync_with(1, || ());
+    }
+
+    /// Gets multiple permits from the semaphore synchronously with a wait callback provided.
+    ///
+    /// The callback is invoked when the task starts waiting for a permit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// let mut wait = false;
+    /// semaphore.acquire_sync_with(|| { wait = true; });
+    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    /// assert!(!wait);
+    /// ```
+    #[inline]
+    pub fn acquire_sync_with<F: FnOnce()>(&self, wait_callback: F) {
+        self.acquire_many_sync_with(1, wait_callback);
     }
 
     /// Tries to get a permit from the semaphore.
@@ -180,6 +210,30 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_many_async(&self, count: usize) {
+        self.acquire_many_async_with(count, || ()).await;
+    }
+
+    /// Gets multiple permits from the semaphore asynchronously with a wait callback provided.
+    ///
+    /// The callback is invoked when the task starts waiting for a permit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// async {
+    ///     let mut wait = false;
+    ///     semaphore.acquire_many_async_with(2, || { wait = true; }).await;
+    ///     assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 2);
+    ///     assert!(!wait);
+    /// };
+    /// ```
+    #[inline]
+    pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, mut wait_callback: F) {
         loop {
             let (result, state) = self.try_acquire_internal(count);
             if result {
@@ -187,10 +241,12 @@ impl Semaphore {
             }
             // The value is checked in `try_acquire_internal`.
             #[allow(clippy::cast_possible_truncation)]
-            if self
-                .wait_resources_async(state, Opcode::Semaphore(count as u8))
+            if let Err(returned) = self
+                .wait_resources_async(state, Opcode::Semaphore(count as u8), wait_callback)
                 .await
             {
+                wait_callback = returned;
+            } else {
                 return;
             }
         }
@@ -211,6 +267,28 @@ impl Semaphore {
     /// ```
     #[inline]
     pub fn acquire_many_sync(&self, count: usize) {
+        self.acquire_many_sync_with(count, || ());
+    }
+
+    /// Gets multiple permits from the semaphore synchronously with a wait callback provided.
+    ///
+    /// The callback is invoked when the task starts waiting for a permit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// let mut wait = false;
+    /// semaphore.acquire_many_sync_with(2, || { wait = true; });
+    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 2);
+    /// assert!(!wait);
+    /// ```
+    #[inline]
+    pub fn acquire_many_sync_with<F: FnOnce()>(&self, count: usize, mut wait_callback: F) {
         loop {
             let (result, state) = self.try_acquire_internal(count);
             if result {
@@ -218,7 +296,11 @@ impl Semaphore {
             }
             // The value is checked in `try_acquire_internal`.
             #[allow(clippy::cast_possible_truncation)]
-            if self.wait_resources_sync(state, Opcode::Semaphore(count as u8)) {
+            if let Err(returned) =
+                self.wait_resources_sync(state, Opcode::Semaphore(count as u8), wait_callback)
+            {
+                wait_callback = returned;
+            } else {
                 return;
             }
         }

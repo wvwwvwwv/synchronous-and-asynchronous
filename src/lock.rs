@@ -5,7 +5,8 @@
 use std::fmt;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
+use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release};
+use std::thread::yield_now;
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
@@ -29,6 +30,18 @@ impl Lock {
     /// Maximum number of shared owners.
     pub const MAX_SHARED_OWNERS: usize = WaitQueue::DATA_MASK - 1;
 
+    /// Poisoned state.
+    const POISONED_STATE: usize = WaitQueue::LOCKED_FLAG;
+
+    /// Acquired the desired lock.
+    const ACQUIRED: u8 = 0_u8;
+
+    /// Could not acquire the desired lock.
+    const NOT_ACQUIRED: u8 = 1_u8;
+
+    /// Poisoned error code;
+    const POISONED: u8 = 2_u8;
+
     /// Returns `true` if the lock is currently free.
     ///
     /// # Examples
@@ -46,7 +59,7 @@ impl Lock {
     #[inline]
     pub fn is_free(&self, mo: Ordering) -> bool {
         let state = self.state.load(mo);
-        (state & WaitQueue::DATA_MASK) == 0
+        state != Self::POISONED_STATE && (state & WaitQueue::DATA_MASK) == 0
     }
 
     /// Returns `true` if an exclusive lock is currently held.
@@ -91,6 +104,26 @@ impl Lock {
         share_state != 0 && share_state != WaitQueue::DATA_MASK
     }
 
+    /// Returns `true` if the [`Lock`] is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    /// assert!(!lock.is_poisoned(Relaxed));
+    ///
+    /// lock.lock_sync();
+    /// assert!(lock.poison_lock());
+    /// assert!(lock.is_poisoned(Relaxed));
+    /// ```
+    #[inline]
+    pub fn is_poisoned(&self, mo: Ordering) -> bool {
+        self.state.load(mo) == Self::POISONED_STATE
+    }
+
     /// Acquires an exclusive lock asynchronously.
     ///
     /// # Examples
@@ -108,14 +141,46 @@ impl Lock {
     /// };
     /// ```
     #[inline]
-    pub async fn lock_async(&self) {
+    pub async fn lock_async(&self) -> bool {
+        self.lock_async_with(|| ()).await
+    }
+
+    /// Acquires an exclusive lock asynchronously with a wait callback provided.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// async {
+    ///     lock.lock_async().await;
+    ///     assert!(lock.is_locked(Relaxed));
+    ///     assert!(!lock.is_shared(Relaxed))
+    /// };
+    /// ```
+    #[inline]
+    pub async fn lock_async_with<F: FnOnce()>(&self, mut callback: F) -> bool {
         loop {
             let (result, state) = self.try_lock_internal();
-            if result {
-                return;
+            if result == Self::ACQUIRED {
+                return true;
+            } else if result == Self::POISONED {
+                return false;
             }
-            if self.wait_resources_async(state, Opcode::Exclusive).await {
-                return;
+            debug_assert_eq!(result, Self::NOT_ACQUIRED);
+
+            match self
+                .wait_resources_async(state, Opcode::Exclusive, callback)
+                .await
+            {
+                Ok(result) => {
+                    debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
+                    return result == Self::ACQUIRED;
+                }
+                Err(returned) => callback = returned,
             }
         }
     }
@@ -136,14 +201,42 @@ impl Lock {
     /// assert!(!lock.try_share());
     /// ```
     #[inline]
-    pub fn lock_sync(&self) {
+    pub fn lock_sync(&self) -> bool {
+        self.lock_sync_with(|| ())
+    }
+
+    /// Acquires an exclusive lock synchronously with a wait callback provided.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// lock.lock_sync();
+    ///
+    /// assert!(lock.is_locked(Relaxed));
+    /// assert!(!lock.try_share());
+    /// ```
+    #[inline]
+    pub fn lock_sync_with<F: FnOnce()>(&self, mut callback: F) -> bool {
         loop {
             let (result, state) = self.try_lock_internal();
-            if result {
-                return;
+            if result == Self::ACQUIRED {
+                return true;
+            } else if result == Self::POISONED {
+                return false;
             }
-            if self.wait_resources_sync(state, Opcode::Exclusive) {
-                return;
+            debug_assert_eq!(result, Self::NOT_ACQUIRED);
+
+            match self.wait_resources_sync(state, Opcode::Exclusive, callback) {
+                Ok(result) => {
+                    debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
+                    return result == Self::ACQUIRED;
+                }
+                Err(returned) => callback = returned,
             }
         }
     }
@@ -165,7 +258,7 @@ impl Lock {
     /// ```
     #[inline]
     pub fn try_lock(&self) -> bool {
-        self.try_lock_internal().0
+        self.try_lock_internal().0 == Self::ACQUIRED
     }
 
     /// Acquires a shared lock asynchronously.
@@ -185,14 +278,46 @@ impl Lock {
     /// };
     /// ```
     #[inline]
-    pub async fn share_async(&self) {
+    pub async fn share_async(&self) -> bool {
+        self.share_async_with(|| ()).await
+    }
+
+    /// Acquires a shared lock asynchronously with a wait callback provided.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// async {
+    ///     lock.share_async().await;
+    ///     assert!(!lock.is_locked(Relaxed));
+    ///     assert!(lock.is_shared(Relaxed))
+    /// };
+    /// ```
+    #[inline]
+    pub async fn share_async_with<F: FnOnce()>(&self, mut callback: F) -> bool {
         loop {
             let (result, state) = self.try_share_internal();
-            if result {
-                return;
+            if result == Self::ACQUIRED {
+                return true;
+            } else if result == Self::POISONED {
+                return false;
             }
-            if self.wait_resources_async(state, Opcode::Shared).await {
-                return;
+            debug_assert_eq!(result, Self::NOT_ACQUIRED);
+
+            match self
+                .wait_resources_async(state, Opcode::Shared, callback)
+                .await
+            {
+                Ok(result) => {
+                    debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
+                    return result == Self::ACQUIRED;
+                }
+                Err(returned) => callback = returned,
             }
         }
     }
@@ -213,14 +338,42 @@ impl Lock {
     /// assert!(!lock.try_lock());
     /// ```
     #[inline]
-    pub fn share_sync(&self) {
+    pub fn share_sync(&self) -> bool {
+        self.share_sync_with(|| ())
+    }
+
+    /// Acquires a shared lock synchronously with a wait callback provided.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// lock.share_sync();
+    ///
+    /// assert!(lock.is_shared(Relaxed));
+    /// assert!(!lock.try_lock());
+    /// ```
+    #[inline]
+    pub fn share_sync_with<F: FnOnce()>(&self, mut callback: F) -> bool {
         loop {
             let (result, state) = self.try_share_internal();
-            if result {
-                return;
+            if result == Self::ACQUIRED {
+                return true;
+            } else if result == Self::POISONED {
+                return false;
             }
-            if self.wait_resources_sync(state, Opcode::Shared) {
-                return;
+            debug_assert_eq!(result, Self::NOT_ACQUIRED);
+
+            match self.wait_resources_sync(state, Opcode::Shared, callback) {
+                Ok(result) => {
+                    debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
+                    return result == Self::ACQUIRED;
+                }
+                Err(returned) => callback = returned,
             }
         }
     }
@@ -243,7 +396,7 @@ impl Lock {
     /// ```
     #[inline]
     pub fn try_share(&self) -> bool {
-        self.try_share_internal().0
+        self.try_share_internal().0 == Self::ACQUIRED
     }
 
     /// Releases an exclusive lock.
@@ -274,6 +427,67 @@ impl Lock {
             Ok(_) => true,
             Err(state) => self.release_loop(state, Opcode::Exclusive),
         }
+    }
+
+    /// Poisons the lock with an exclusive lock acquired.
+    ///
+    /// Returns `true` if the lock was successfully poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// use saa::Lock;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// assert!(!lock.poison_lock());
+    ///
+    /// lock.lock_sync();
+    ///
+    /// assert!(lock.poison_lock());
+    /// assert!(lock.is_poisoned(Relaxed));
+    /// ```
+    #[inline]
+    pub fn poison_lock(&self) -> bool {
+        match self.state.compare_exchange(
+            WaitQueue::DATA_MASK,
+            Self::POISONED_STATE,
+            Release,
+            Relaxed,
+        ) {
+            Ok(_) => true,
+            Err(state) => self.poison_lock_internal(state),
+        }
+    }
+
+    /// Clears poison from the lock.
+    ///
+    /// Returns `true` if the lock was successfully cleared.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// use saa::Lock;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// assert!(!lock.poison_lock());
+    ///
+    /// lock.lock_sync();
+    ///
+    /// assert!(lock.poison_lock());
+    /// assert!(lock.clear_poison());
+    /// assert!(!lock.is_poisoned(Relaxed));
+    /// ```
+    #[inline]
+    pub fn clear_poison(&self) -> bool {
+        self.state
+            .compare_exchange(Self::POISONED_STATE, 0, Release, Relaxed)
+            .is_ok()
     }
 
     /// Releases a shared lock.
@@ -307,18 +521,20 @@ impl Lock {
     }
 
     /// Tries to acquire an exclusive lock.
-    fn try_lock_internal(&self) -> (bool, usize) {
+    fn try_lock_internal(&self) -> (u8, usize) {
         let Err(mut state) = self
             .state
             .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Relaxed)
         else {
-            return (true, 0);
+            return (Self::ACQUIRED, 0);
         };
 
         loop {
-            if state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0 {
+            if state == Self::POISONED_STATE {
+                return (Self::POISONED, state);
+            } else if state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0 {
                 // There is a waiting thread, and this should not acquire the lock.
-                return (false, state);
+                return (Self::NOT_ACQUIRED, state);
             }
 
             if state & WaitQueue::DATA_MASK == 0 {
@@ -328,7 +544,7 @@ impl Lock {
                     Acquire,
                     Relaxed,
                 ) {
-                    Ok(_) => return (true, 0),
+                    Ok(_) => return (Self::ACQUIRED, 0),
                     Err(new_state) => state = new_state,
                 }
             }
@@ -336,24 +552,61 @@ impl Lock {
     }
 
     /// Tries to acquire a shared lock.
-    fn try_share_internal(&self) -> (bool, usize) {
+    fn try_share_internal(&self) -> (u8, usize) {
         let Err(mut state) = self.state.compare_exchange(0, 1, Acquire, Relaxed) else {
-            return (true, 0);
+            return (Self::ACQUIRED, 0);
         };
 
         loop {
-            if state & WaitQueue::ADDR_MASK != 0
+            if state == Self::POISONED_STATE {
+                return (Self::POISONED, state);
+            } else if state & WaitQueue::ADDR_MASK != 0
                 || state & WaitQueue::DATA_MASK >= Self::MAX_SHARED_OWNERS
             {
                 // There is a waiting thread, or the lock can no longer be shared.
-                return (false, state);
+                return (Self::NOT_ACQUIRED, state);
             }
 
             match self
                 .state
                 .compare_exchange(state, state + 1, Acquire, Relaxed)
             {
-                Ok(_) => return (true, 0),
+                Ok(_) => return (Self::ACQUIRED, 0),
+                Err(new_state) => state = new_state,
+            }
+        }
+    }
+
+    /// Poisons the lock.
+    fn poison_lock_internal(&self, mut state: usize) -> bool {
+        loop {
+            if state == Self::POISONED_STATE || state & WaitQueue::DATA_MASK != WaitQueue::DATA_MASK
+            {
+                // Already poisoned or the lock is not held by the current thread.
+                return false;
+            }
+            if state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
+                // This only happens when an asynchronous task is being cancelled.
+                yield_now();
+                state = self.state.load(Relaxed);
+                continue;
+            }
+
+            match self
+                .state
+                .compare_exchange(state, Self::POISONED_STATE, AcqRel, Relaxed)
+            {
+                Ok(prev_state) => {
+                    let entry_addr = prev_state & WaitQueue::ADDR_MASK;
+                    if entry_addr != 0 {
+                        WaitQueue::iter_forward(WaitQueue::addr_to_ptr(entry_addr), |entry, _| {
+                            entry.set_result(Self::POISONED);
+                            false
+                        });
+                    }
+
+                    return true;
+                }
                 Err(new_state) => state = new_state,
             }
         }
@@ -366,12 +619,14 @@ impl fmt::Debug for Lock {
         let lock_share_state = state & WaitQueue::DATA_MASK;
         let locked = lock_share_state == WaitQueue::DATA_MASK;
         let share_count = if locked { 0 } else { lock_share_state };
+        let poisoned = state == Self::POISONED_STATE;
         let wait_queue_being_processed = state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG;
         let wait_queue_tail_addr = state & WaitQueue::ADDR_MASK;
         f.debug_struct("WaitQueue")
             .field("state", &state)
             .field("locked", &locked)
             .field("share_count", &share_count)
+            .field("poisoned", &poisoned)
             .field("wait_queue_being_processed", &wait_queue_being_processed)
             .field("wait_queue_tail_addr", &wait_queue_tail_addr)
             .finish()

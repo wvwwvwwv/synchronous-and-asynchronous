@@ -303,6 +303,7 @@ async fn lock_chaos() {
         if i % 2 == 0 {
             tasks.push(tokio::spawn(async move {
                 for j in 0..num_iters {
+                    assert!(!lock.is_poisoned(Relaxed));
                     if j % 11 == 0 {
                         lock.lock_async().await;
                         assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
@@ -314,11 +315,13 @@ async fn lock_chaos() {
                         check.fetch_sub(1, Relaxed);
                         assert!(lock.release_share());
                     }
+                    assert!(!lock.is_poisoned(Relaxed));
                 }
             }));
         } else {
             threads.push(thread::spawn(move || {
                 for j in 0..num_iters {
+                    assert!(!lock.is_poisoned(Relaxed));
                     if j % 7 == 3 {
                         lock.test_drop_wait_queue_entry(Opcode::Exclusive);
                     } else if j % 11 == 0 {
@@ -332,6 +335,7 @@ async fn lock_chaos() {
                         check.fetch_sub(1, Relaxed);
                         assert!(lock.release_share());
                     }
+                    assert!(!lock.is_poisoned(Relaxed));
                 }
             }));
         }

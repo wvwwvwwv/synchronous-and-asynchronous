@@ -281,13 +281,58 @@ impl Gate {
     /// # Examples
     ///
     /// ```
+    /// use futures::future;
     /// use saa::Gate;
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let a = async {
+    ///     assert!(gate.enter_async().await.is_ok());
+    /// };
+    /// let b = async {
+    ///     gate.permit();
+    /// };
+    /// future::join(a, b);
     /// ```
     #[inline]
     pub async fn enter_async(&self) -> Result<State, Error> {
+        self.enter_async_with(|| ()).await
+    }
+
+    /// Enters the [`Gate`] synchronously with a wait callback provided.
+    ///
+    /// Returns the number of tasks that were waiting to enter the gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it failed to enter the [`Gate`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use futures::future;
+    /// use saa::Gate;
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let a = async {
+    ///     let mut wait = false;
+    ///     assert!(gate.enter_async_with(|| wait = true).await.is_ok());
+    /// };
+    /// let b = async {
+    ///    gate.permit();
+    /// };
+    /// future::join(a, b);
+    /// ```
+    #[inline]
+    pub async fn enter_async_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
         let mut pager = Pager::default();
+        pager.entry.replace((
+            self,
+            WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()),
+        ));
         let mut pinned_pager = Pin::new(&mut pager);
-        self.register_async(&mut pinned_pager);
+        self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.await
     }
 
@@ -332,9 +377,58 @@ impl Gate {
     /// ```
     #[inline]
     pub fn enter_sync(&self) -> Result<State, Error> {
+        self.enter_sync_with(|| ())
+    }
+
+    /// Enters the [`Gate`] synchronously with a wait callback provided.
+    ///
+    /// Returns the number of tasks that were waiting to enter the gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it failed to enter the [`Gate`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::thread;
+    ///
+    /// use saa::Gate;
+    /// use saa::gate::State;
+    ///
+    /// let gate = Arc::new(Gate::default());
+    ///
+    /// let gate_clone = gate.clone();
+    /// let thread_1 = thread::spawn(move || {
+    ///     let mut wait = false;
+    ///     assert_eq!(gate_clone.enter_sync_with(|| wait = true), Ok(State::Controlled));
+    /// });
+    ///
+    /// let gate_clone = gate.clone();
+    /// let thread_2 = thread::spawn(move || {
+    ///     let mut wait = false;
+    ///     assert_eq!(gate_clone.enter_sync_with(|| wait = true), Ok(State::Controlled));
+    /// });
+    ///
+    /// let mut cnt = 0;
+    /// while cnt != 2 {
+    ///     if let Ok(n) = gate.permit() {
+    ///         cnt += n;
+    ///     }
+    /// }
+    ///
+    /// thread_1.join().unwrap();
+    /// thread_2.join().unwrap();
+    /// ```
+    #[inline]
+    pub fn enter_sync_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
         let mut pager = Pager::default();
+        pager
+            .entry
+            .replace((self, WaitQueue::new_sync(Opcode::Wait)));
         let mut pinned_pager = Pin::new(&mut pager);
-        self.register_sync(&mut pinned_pager);
+        self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_sync()
     }
 
@@ -374,7 +468,7 @@ impl Gate {
             self,
             WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()),
         ));
-        self.push_wait_queue_entry(pager);
+        self.push_wait_queue_entry(pager, || ());
         true
     }
 
@@ -417,7 +511,7 @@ impl Gate {
         pager
             .entry
             .replace((self, WaitQueue::new_sync(Opcode::Wait)));
-        self.push_wait_queue_entry(pager);
+        self.push_wait_queue_entry(pager, || ());
         true
     }
 
@@ -452,14 +546,21 @@ impl Gate {
     }
 
     /// Pushes the wait queue entry.
-    fn push_wait_queue_entry(&self, entry: &mut Pin<&mut Pager>) {
+    fn push_wait_queue_entry<F: FnOnce()>(
+        &self,
+        entry: &mut Pin<&mut Pager>,
+        mut wait_callback: F,
+    ) {
         if let Some((_, entry)) = entry.entry.as_ref() {
             let pinned_entry = Pin::new(entry);
             loop {
                 let state = self.state.load(Relaxed);
                 match State::from(state & WaitQueue::DATA_MASK) {
                     State::Controlled => {
-                        if !self.try_push_wait_queue_entry(pinned_entry, state) {
+                        if let Some(returned) =
+                            self.try_push_wait_queue_entry(pinned_entry, state, wait_callback)
+                        {
+                            wait_callback = returned;
                             continue;
                         }
                     }

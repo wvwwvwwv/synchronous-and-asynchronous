@@ -29,19 +29,36 @@ pub(crate) trait SyncPrimitive: Sized {
 
     /// Tries to push a wait queue entry into the wait queue.
     #[must_use]
-    fn try_push_wait_queue_entry(&self, entry: Pin<&WaitQueue>, state: usize) -> bool {
+    fn try_push_wait_queue_entry<F: FnOnce()>(
+        &self,
+        entry: Pin<&WaitQueue>,
+        state: usize,
+        wait_callback: F,
+    ) -> Option<F> {
         let entry_addr = WaitQueue::ref_to_ptr(&entry).expose_provenance();
         debug_assert_eq!(entry_addr & (!WaitQueue::ADDR_MASK), 0);
 
         entry.update_next_entry_ptr(WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK));
         let next_state = (state & (!WaitQueue::ADDR_MASK)) | entry_addr;
-        self.state()
+        if self
+            .state()
             .compare_exchange(state, next_state, AcqRel, Acquire)
             .is_ok()
+        {
+            wait_callback();
+            None
+        } else {
+            Some(wait_callback)
+        }
     }
 
     /// Waits for the desired resources asynchronously.
-    async fn wait_resources_async(&self, state: usize, mode: Opcode) -> bool {
+    async fn wait_resources_async<F: FnOnce()>(
+        &self,
+        state: usize,
+        mode: Opcode,
+        wait_callback: F,
+    ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
         let async_wait = WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.addr());
@@ -51,18 +68,23 @@ pub(crate) trait SyncPrimitive: Sized {
             WaitQueue::ref_to_ptr(&pinned_async_wait.0)
         );
 
-        if !self.try_push_wait_queue_entry(pinned_async_wait.0, state) {
+        if let Some(callback) =
+            self.try_push_wait_queue_entry(pinned_async_wait.0, state, wait_callback)
+        {
             pinned_async_wait.0.set_result(0);
             pinned_async_wait.0.result_acknowledged();
-            return false;
+            return Err(callback);
         }
-        pinned_async_wait.await;
-        true
+        Ok(pinned_async_wait.await)
     }
 
     /// Waits for the desired resources synchronously.
-    #[must_use]
-    fn wait_resources_sync(&self, state: usize, mode: Opcode) -> bool {
+    fn wait_resources_sync<F: FnOnce()>(
+        &self,
+        state: usize,
+        mode: Opcode,
+        wait_callback: F,
+    ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
         let sync_wait = WaitQueue::new_sync(mode);
@@ -72,12 +94,12 @@ pub(crate) trait SyncPrimitive: Sized {
             WaitQueue::ref_to_ptr(&pinned_sync_wait)
         );
 
-        if self.try_push_wait_queue_entry(pinned_sync_wait, state) {
-            pinned_sync_wait.poll_result_sync();
-            true
-        } else {
-            false
+        if let Some(callback) =
+            self.try_push_wait_queue_entry(pinned_sync_wait, state, wait_callback)
+        {
+            return Err(callback);
         }
+        Ok(pinned_sync_wait.poll_result_sync())
     }
 
     /// Releases resources represented by the supplied operation mode.
@@ -351,7 +373,10 @@ pub(crate) trait SyncPrimitive: Sized {
             WaitQueue::ref_to_ptr(&pinned_async_wait.0)
         );
 
-        if !self.try_push_wait_queue_entry(pinned_async_wait.0, state) {
+        if self
+            .try_push_wait_queue_entry(pinned_async_wait.0, state, || ())
+            .is_some()
+        {
             pinned_async_wait.0.set_result(0);
             pinned_async_wait.0.result_acknowledged();
         }
