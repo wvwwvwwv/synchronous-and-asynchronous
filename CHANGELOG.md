@@ -1,5 +1,9 @@
 # Changelog
 
+2.0.0
+
+* New synchronization primitive: `saa::Gate`.
+
 1.1.0
 
 * Fix a hang issue when an asynchronous task is dropped before completion.

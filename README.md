@@ -70,9 +70,33 @@ async {
 ### Examples
 
 ```rust
-use saa::Gate;
+use std::sync::Arc;
+use std::thread;
 
-let gate = Gate::default();
+use saa::Gate;
+use saa::gate::State;
+
+let gate = Arc::new(Gate::default());
+
+let mut threads = Vec::new();
+
+for _ in 0..4 {
+    let gate = gate.clone();
+    threads.push(thread::spawn(move || {
+        assert_eq!(gate.enter_sync(), Ok(State::Controlled));
+    }));
+}
+
+let mut cnt = 0;
+while cnt != 4 {
+    if let Ok(n) = gate.permit() {
+        cnt += n;
+    }
+}
+
+for thread in threads {
+    thread.join().unwrap();
+}
 ```
 
 ## Notes

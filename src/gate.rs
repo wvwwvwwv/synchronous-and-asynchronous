@@ -107,6 +107,8 @@ impl Gate {
     ///
     /// let gate = Gate::default();
     ///
+    /// assert_eq!(gate.reset(), None);
+    ///
     /// gate.seal();
     ///
     /// assert_eq!(gate.reset(), Some(State::Sealed));
@@ -127,7 +129,8 @@ impl Gate {
         }
     }
 
-    /// Permits waiting tasks to enter the [`Gate`].
+    /// Permits waiting tasks to enter the [`Gate`] if the [`Gate`] is in a
+    /// [`Controlled`](State::Controlled) state.
     ///
     /// Returns the number of permitted tasks.
     ///
@@ -171,7 +174,8 @@ impl Gate {
         }
     }
 
-    /// Rejects waiting tasks to enter the [`Gate`].
+    /// Rejects waiting tasks to enter the [`Gate`] if the [`Gate`] is in a
+    /// [`Controlled`](State::Controlled) state.
     ///
     /// Returns the number of permitted tasks.
     ///
@@ -217,7 +221,7 @@ impl Gate {
 
     /// Opens the [`Gate`] to allow any tasks to enter it.
     ///
-    /// Returns the number of tasks that were waiting to entier it.
+    /// Returns the number of tasks that were waiting to enter it.
     ///
     /// # Examples
     ///
@@ -241,7 +245,7 @@ impl Gate {
         self.wake_all(Some(State::Open), None)
     }
 
-    /// Seals the [`Gate`] to clear the waiting tasks and disallow tasks to enter.
+    /// Seals the [`Gate`] to disallow tasks to enter.
     ///
     /// Returns the number of tasks that were waiting to enter the gate.
     ///
@@ -341,7 +345,25 @@ impl Gate {
     /// # Examples
     ///
     /// ```
+    /// use std::pin::Pin;
+    ///
     /// use saa::Gate;
+    /// use saa::gate::{Error, Pager, State};
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let mut pager = Pager::default();
+    /// let mut pinned_pager = Pin::new(&mut pager);
+    ///
+    /// assert!(gate.register_async(&mut pinned_pager));
+    ///
+    /// assert_eq!(gate.open().1, 1);
+    ///
+    /// assert_eq!(pinned_pager.poll_sync(), Err(Error::WrongMode));
+    ///
+    /// async {
+    ///     assert_eq!(pinned_pager.await, Ok(State::Open));
+    /// };
     /// ```
     #[inline]
     pub fn register_async<'g>(&'g self, pager: &mut Pin<&mut Pager<'g>>) -> bool {

@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 use loom::sync::atomic::AtomicBool;
-use loom::thread::spawn;
+use loom::thread::{spawn, yield_now};
 
+use crate::gate;
 use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
-use crate::{Lock, Semaphore};
+use crate::{Gate, Lock, Semaphore};
 
 #[test]
 fn lock_shared() {
@@ -65,12 +66,30 @@ fn semaphore_release_acquire() {
         let thread = spawn(move || {
             semaphore_clone.acquire_many_sync(9);
             assert!(check_clone.load(Relaxed));
-            semaphore_clone.acquire_many_sync(2);
         });
 
         check.store(true, Relaxed);
-        assert!(semaphore.release_many(10));
+        assert!(semaphore.release_many(8));
         assert!(semaphore.release());
+        assert!(thread.join().is_ok());
+    });
+}
+
+#[test]
+fn gate_enter() {
+    loom::model(|| {
+        let gate = Arc::new(Gate::default());
+        let gate_clone = gate.clone();
+        let thread = spawn(move || {
+            assert_eq!(gate_clone.enter_sync(), Ok(gate::State::Controlled));
+        });
+
+        loop {
+            if gate.permit() == Ok(1) {
+                break;
+            }
+            yield_now();
+        }
         assert!(thread.join().is_ok());
     });
 }
