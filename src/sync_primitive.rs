@@ -27,12 +27,6 @@ pub(crate) trait SyncPrimitive: Sized {
         self_ptr.expose_provenance()
     }
 
-    /// Converts a memory address back to a reference to `Self`.
-    fn self_ref(addr: usize) -> &'static Self {
-        let this: &Self = unsafe { &*with_exposed_provenance(addr) };
-        this
-    }
-
     /// Tries to push a wait queue entry into the wait queue.
     #[must_use]
     fn try_push_wait_queue_entry(&self, entry: Pin<&WaitQueue>, state: usize) -> bool {
@@ -49,10 +43,6 @@ pub(crate) trait SyncPrimitive: Sized {
     /// Waits for the desired resources asynchronously.
     async fn wait_resources_async(&self, state: usize, mode: Opcode) -> bool {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-
-        if cfg!(miri) {
-            return false;
-        }
 
         let async_wait = WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.addr());
         let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
@@ -74,10 +64,6 @@ pub(crate) trait SyncPrimitive: Sized {
     #[must_use]
     fn wait_resources_sync(&self, state: usize, mode: Opcode) -> bool {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-
-        if cfg!(miri) {
-            return false;
-        }
 
         let sync_wait = WaitQueue::new_sync(mode);
         let pinned_sync_wait = Pin::new(&sync_wait);
@@ -304,8 +290,8 @@ pub(crate) trait SyncPrimitive: Sized {
 
     /// Cleans up a [`WaitQueue`] entry that was pushed into the wait queue, but has not been
     /// processed.
-    fn cleanup_wait_queue_entry(entry: &WaitQueue, self_addr: usize) {
-        let this: &Self = unsafe { &*with_exposed_provenance(self_addr) };
+    fn cleanup_wait_queue_entry(entry: &WaitQueue, this_addr: usize) {
+        let this: &Self = unsafe { &*with_exposed_provenance(this_addr) };
         let wait_queue_ptr: *const WaitQueue = addr_of!(*entry);
         let wait_queue_addr = wait_queue_ptr.expose_provenance();
 

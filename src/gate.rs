@@ -54,21 +54,21 @@ pub enum State {
 #[repr(u8)]
 pub enum Error {
     /// The [`Gate`] rejected the task.
-    Rejected = 16_u8,
+    Rejected = 4_u8,
     /// The [`Gate`] has been sealed.
-    Sealed = 17_u8,
+    Sealed = 8_u8,
     /// Spurious failure to enter a [`Gate`] in a [`Controlled`](State::Controlled) state.
     ///
     /// This can happen if a task holding a [`Pager`] gets cancelled or drops the [`Pager`] before
     /// the [`Gate`] has permitted or rejected the task; the task causes all the other waiting tasks
     /// of the [`Gate`] to get this error.
-    SpuriousFailure = 18_u8,
+    SpuriousFailure = 12_u8,
     /// The [`Pager`] is not registered in any [`Gate`].
-    NotRegistered = 19_u8,
+    NotRegistered = 16_u8,
     /// The wrong asynchronous/synchronous mode was used in a [`Pager`].
     WrongMode = 20_u8,
     /// Unknown error.
-    Unknown = 21_u8,
+    Unknown = 24_u8,
 }
 
 impl Gate {
@@ -372,7 +372,7 @@ impl Gate {
         }
         pager.entry.replace((
             self,
-            WaitQueue::new_async(Opcode::Wait, Self::cleanup_wait_queue_entry, self.addr()),
+            WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()),
         ));
         self.push_wait_queue_entry(pager);
         true
@@ -455,23 +455,29 @@ impl Gate {
     fn push_wait_queue_entry(&self, entry: &mut Pin<&mut Pager>) {
         if let Some((_, entry)) = entry.entry.as_ref() {
             let pinned_entry = Pin::new(entry);
-            let mut state = self.state.load(Relaxed);
-            while (state & WaitQueue::DATA_MASK) == u8::from(State::Controlled) as usize {
-                if self.try_push_wait_queue_entry(pinned_entry, state) {
-                    return;
+            loop {
+                let state = self.state.load(Relaxed);
+                match State::from(state & WaitQueue::DATA_MASK) {
+                    State::Controlled => {
+                        if !self.try_push_wait_queue_entry(pinned_entry, state) {
+                            continue;
+                        }
+                    }
+                    State::Sealed => {
+                        entry.set_result(Self::into_u8(State::Sealed, Some(Error::Sealed)));
+                    }
+                    State::Open => {
+                        entry.set_result(Self::into_u8(State::Open, None));
+                    }
                 }
-                state = self.state.load(Relaxed);
+                break;
             }
         }
     }
 
-    /// Cleans up the wait queue entry.
-    fn cleanup_wait_queue_entry(entry: &WaitQueue, self_addr: usize) {
-        let this: &Self = Self::self_ref(self_addr);
-        debug_assert!(!entry.is_sync());
-
-        this.wake_all(None, Some(Error::SpuriousFailure));
-        entry.acknowledge_result_sync();
+    /// Noop function.
+    fn noop(_entry: &WaitQueue, _this_addr: usize) {
+        unreachable!("Noop function called");
     }
 
     /// Converts `(State, Error)` into `u8`.
@@ -618,9 +624,9 @@ impl Drop for Pager<'_> {
         let Some((gate, entry)) = self.entry.as_mut() else {
             return;
         };
-        if entry.is_sync() {
+        if entry.try_acknowledge_result().is_none() {
             gate.wake_all(None, Some(Error::SpuriousFailure));
-            entry.poll_result_sync();
+            entry.acknowledge_result_sync();
         }
     }
 }
@@ -679,12 +685,12 @@ impl From<Error> for u8 {
     #[inline]
     fn from(value: Error) -> Self {
         match value {
-            Error::Rejected => 16_u8,
-            Error::Sealed => 17_u8,
-            Error::SpuriousFailure => 18_u8,
-            Error::NotRegistered => 19_u8,
+            Error::Rejected => 4_u8,
+            Error::Sealed => 8_u8,
+            Error::SpuriousFailure => 12_u8,
+            Error::NotRegistered => 16_u8,
             Error::WrongMode => 20_u8,
-            Error::Unknown => 21_u8,
+            Error::Unknown => 24_u8,
         }
     }
 }
@@ -700,10 +706,10 @@ impl From<usize> for Error {
     #[inline]
     fn from(value: usize) -> Self {
         match value {
-            16 => Error::Rejected,
-            17 => Error::Sealed,
-            18 => Error::SpuriousFailure,
-            19 => Error::NotRegistered,
+            4 => Error::Rejected,
+            8 => Error::Sealed,
+            12 => Error::SpuriousFailure,
+            16 => Error::NotRegistered,
             20 => Error::WrongMode,
             _ => Error::Unknown,
         }

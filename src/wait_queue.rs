@@ -244,7 +244,7 @@ impl WaitQueue {
         match &self.monitor {
             Monitor::Async(async_context) => {
                 // Try-locking is sufficient.
-                if let Ok(mut waker) = async_context.waker.try_lock() {
+                if let Ok(mut waker) = async_context.waker.lock() {
                     if let Some(waker) = waker.take() {
                         waker.wake();
                     }
@@ -278,15 +278,9 @@ impl WaitQueue {
             if let Some(result) = self.try_acknowledge_result() {
                 return Poll::Ready(result);
             }
-        } else if let Ok(mut waker) = async_context.waker.try_lock() {
+        } else if let Ok(mut waker) = async_context.waker.lock() {
             if !self.ready.load(Acquire) {
                 *waker = this_waker.take();
-            }
-            drop(waker);
-
-            if self.ready.load(Acquire) {
-                // The result may have been set while the lock was held.
-                cx.waker().wake_by_ref();
             }
         }
 
@@ -357,7 +351,7 @@ impl WaitQueue {
     }
 
     /// Tries to get the result and acknowledges it.
-    fn try_acknowledge_result(&self) -> Option<u8> {
+    pub(crate) fn try_acknowledge_result(&self) -> Option<u8> {
         self.finalized.load(Acquire).then(|| {
             debug_assert!(self.ready.load(Relaxed));
             self.acknowledged.store(true, Release);
