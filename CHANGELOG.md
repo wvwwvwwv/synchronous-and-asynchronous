@@ -1,8 +1,9 @@
 # Changelog
 
-2.1.0
+3.0.0
 
-* (WIP) Add a poisoned state to `saa::Lock`.
+* Add a poisoned state to `saa::Lock`.
+* Add `*_with` methods for notifying when a thread enters a wait queue.
 
 2.0.0
 

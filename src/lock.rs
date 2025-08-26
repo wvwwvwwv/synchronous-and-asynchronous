@@ -126,6 +126,8 @@ impl Lock {
 
     /// Acquires an exclusive lock asynchronously.
     ///
+    /// Returns `false` if the lock is poisoned.
+    ///
     /// # Examples
     ///
     /// ```
@@ -147,6 +149,9 @@ impl Lock {
 
     /// Acquires an exclusive lock asynchronously with a wait callback provided.
     ///
+    /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
+    /// waiting for a lock.
+    ///
     /// # Examples
     ///
     /// ```
@@ -162,7 +167,7 @@ impl Lock {
     /// };
     /// ```
     #[inline]
-    pub async fn lock_async_with<F: FnOnce()>(&self, mut callback: F) -> bool {
+    pub async fn lock_async_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
         loop {
             let (result, state) = self.try_lock_internal();
             if result == Self::ACQUIRED {
@@ -173,19 +178,21 @@ impl Lock {
             debug_assert_eq!(result, Self::NOT_ACQUIRED);
 
             match self
-                .wait_resources_async(state, Opcode::Exclusive, callback)
+                .wait_resources_async(state, Opcode::Exclusive, begin_wait)
                 .await
             {
                 Ok(result) => {
                     debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
                     return result == Self::ACQUIRED;
                 }
-                Err(returned) => callback = returned,
+                Err(returned) => begin_wait = returned,
             }
         }
     }
 
     /// Acquires an exclusive lock synchronously.
+    ///
+    /// Returns `false` if the lock is poisoned.
     ///
     /// # Examples
     ///
@@ -207,6 +214,9 @@ impl Lock {
 
     /// Acquires an exclusive lock synchronously with a wait callback provided.
     ///
+    /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
+    /// waiting for a lock.
+    ///
     /// # Examples
     ///
     /// ```
@@ -221,7 +231,7 @@ impl Lock {
     /// assert!(!lock.try_share());
     /// ```
     #[inline]
-    pub fn lock_sync_with<F: FnOnce()>(&self, mut callback: F) -> bool {
+    pub fn lock_sync_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
         loop {
             let (result, state) = self.try_lock_internal();
             if result == Self::ACQUIRED {
@@ -231,12 +241,12 @@ impl Lock {
             }
             debug_assert_eq!(result, Self::NOT_ACQUIRED);
 
-            match self.wait_resources_sync(state, Opcode::Exclusive, callback) {
+            match self.wait_resources_sync(state, Opcode::Exclusive, begin_wait) {
                 Ok(result) => {
                     debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
                     return result == Self::ACQUIRED;
                 }
-                Err(returned) => callback = returned,
+                Err(returned) => begin_wait = returned,
             }
         }
     }
@@ -263,6 +273,8 @@ impl Lock {
 
     /// Acquires a shared lock asynchronously.
     ///
+    /// Returns `false` if the lock is poisoned.
+    ///
     /// # Examples
     ///
     /// ```
@@ -284,6 +296,9 @@ impl Lock {
 
     /// Acquires a shared lock asynchronously with a wait callback provided.
     ///
+    /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
+    /// waiting for a lock.
+    ///
     /// # Examples
     ///
     /// ```
@@ -299,7 +314,7 @@ impl Lock {
     /// };
     /// ```
     #[inline]
-    pub async fn share_async_with<F: FnOnce()>(&self, mut callback: F) -> bool {
+    pub async fn share_async_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
         loop {
             let (result, state) = self.try_share_internal();
             if result == Self::ACQUIRED {
@@ -310,19 +325,21 @@ impl Lock {
             debug_assert_eq!(result, Self::NOT_ACQUIRED);
 
             match self
-                .wait_resources_async(state, Opcode::Shared, callback)
+                .wait_resources_async(state, Opcode::Shared, begin_wait)
                 .await
             {
                 Ok(result) => {
                     debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
                     return result == Self::ACQUIRED;
                 }
-                Err(returned) => callback = returned,
+                Err(returned) => begin_wait = returned,
             }
         }
     }
 
     /// Acquires a shared lock synchronously.
+    ///
+    /// Returns `false` if the lock is poisoned.
     ///
     /// # Examples
     ///
@@ -344,6 +361,9 @@ impl Lock {
 
     /// Acquires a shared lock synchronously with a wait callback provided.
     ///
+    /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
+    /// waiting for a lock.
+    ///
     /// # Examples
     ///
     /// ```
@@ -358,7 +378,7 @@ impl Lock {
     /// assert!(!lock.try_lock());
     /// ```
     #[inline]
-    pub fn share_sync_with<F: FnOnce()>(&self, mut callback: F) -> bool {
+    pub fn share_sync_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
         loop {
             let (result, state) = self.try_share_internal();
             if result == Self::ACQUIRED {
@@ -368,20 +388,20 @@ impl Lock {
             }
             debug_assert_eq!(result, Self::NOT_ACQUIRED);
 
-            match self.wait_resources_sync(state, Opcode::Shared, callback) {
+            match self.wait_resources_sync(state, Opcode::Shared, begin_wait) {
                 Ok(result) => {
                     debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
                     return result == Self::ACQUIRED;
                 }
-                Err(returned) => callback = returned,
+                Err(returned) => begin_wait = returned,
             }
         }
     }
 
     /// Tries to acquire a shared lock.
     ///
-    /// Returns `false` if an exclusive lock was acquired or the number of shared owners has reached
-    /// [`Self::MAX_SHARED_OWNERS`].
+    /// Returns `false` if an exclusive lock was acquired, the number of shared owners has reached
+    /// [`Self::MAX_SHARED_OWNERS`], or the lock is poisoned.
     ///
     /// # Examples
     ///
@@ -417,6 +437,12 @@ impl Lock {
     ///
     /// assert!(lock.try_share());
     /// assert!(!lock.release_lock());
+    /// assert!(lock.release_share());
+    ///
+    /// lock.lock_sync();
+    /// lock.poison_lock();
+    ///
+    /// assert!(!lock.release_lock());
     /// ```
     #[inline]
     pub fn release_lock(&self) -> bool {
@@ -429,9 +455,9 @@ impl Lock {
         }
     }
 
-    /// Poisons the lock with an exclusive lock acquired.
+    /// Poisons the lock with an exclusive lock held.
     ///
-    /// Returns `true` if the lock was successfully poisoned.
+    /// Returns `false` if an exclusive lock was not held, or the lock was already poisoned.
     ///
     /// # Examples
     ///
@@ -448,6 +474,13 @@ impl Lock {
     ///
     /// assert!(lock.poison_lock());
     /// assert!(lock.is_poisoned(Relaxed));
+    ///
+    /// assert!(!lock.poison_lock());
+    ///
+    /// assert!(!lock.lock_sync());
+    /// assert!(!lock.share_sync());
+    /// assert!(!lock.release_lock());
+    /// assert!(!lock.release_share());
     /// ```
     #[inline]
     pub fn poison_lock(&self) -> bool {
@@ -511,6 +544,10 @@ impl Lock {
     ///
     /// assert!(!lock.release_share());
     /// assert!(lock.try_lock());
+    ///
+    /// lock.poison_lock();
+    ///
+    /// assert!(!lock.release_share());
     /// ```
     #[inline]
     pub fn release_share(&self) -> bool {

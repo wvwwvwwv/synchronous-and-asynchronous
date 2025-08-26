@@ -33,7 +33,7 @@ pub(crate) trait SyncPrimitive: Sized {
         &self,
         entry: Pin<&WaitQueue>,
         state: usize,
-        wait_callback: F,
+        begin_wait: F,
     ) -> Option<F> {
         let entry_addr = WaitQueue::ref_to_ptr(&entry).expose_provenance();
         debug_assert_eq!(entry_addr & (!WaitQueue::ADDR_MASK), 0);
@@ -45,10 +45,10 @@ pub(crate) trait SyncPrimitive: Sized {
             .compare_exchange(state, next_state, AcqRel, Acquire)
             .is_ok()
         {
-            wait_callback();
+            begin_wait();
             None
         } else {
-            Some(wait_callback)
+            Some(begin_wait)
         }
     }
 
@@ -57,7 +57,7 @@ pub(crate) trait SyncPrimitive: Sized {
         &self,
         state: usize,
         mode: Opcode,
-        wait_callback: F,
+        begin_wait: F,
     ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
@@ -68,12 +68,12 @@ pub(crate) trait SyncPrimitive: Sized {
             WaitQueue::ref_to_ptr(&pinned_async_wait.0)
         );
 
-        if let Some(callback) =
-            self.try_push_wait_queue_entry(pinned_async_wait.0, state, wait_callback)
+        if let Some(returned) =
+            self.try_push_wait_queue_entry(pinned_async_wait.0, state, begin_wait)
         {
             pinned_async_wait.0.set_result(0);
             pinned_async_wait.0.result_acknowledged();
-            return Err(callback);
+            return Err(returned);
         }
         Ok(pinned_async_wait.await)
     }
@@ -83,7 +83,7 @@ pub(crate) trait SyncPrimitive: Sized {
         &self,
         state: usize,
         mode: Opcode,
-        wait_callback: F,
+        begin_wait: F,
     ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
@@ -94,10 +94,9 @@ pub(crate) trait SyncPrimitive: Sized {
             WaitQueue::ref_to_ptr(&pinned_sync_wait)
         );
 
-        if let Some(callback) =
-            self.try_push_wait_queue_entry(pinned_sync_wait, state, wait_callback)
+        if let Some(returned) = self.try_push_wait_queue_entry(pinned_sync_wait, state, begin_wait)
         {
-            return Err(callback);
+            return Err(returned);
         }
         Ok(pinned_sync_wait.poll_result_sync())
     }

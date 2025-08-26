@@ -20,7 +20,7 @@ fn lock_shared() {
         let lock_clone = lock.clone();
         let check_clone = check.clone();
         let thread = spawn(move || {
-            lock_clone.share_sync();
+            assert!(lock_clone.share_sync());
             assert!(check_clone.load(Relaxed));
             assert!(lock_clone.release_share());
         });
@@ -42,13 +42,32 @@ fn lock_exclusive() {
         let lock_clone = lock.clone();
         let check_clone = check.clone();
         let thread = spawn(move || {
-            lock_clone.lock_sync();
+            assert!(lock_clone.lock_sync());
             assert!(check_clone.load(Relaxed));
             assert!(lock_clone.release_lock());
         });
 
         check.store(true, Relaxed);
         assert!(lock.release_share());
+        assert!(thread.join().is_ok());
+    });
+}
+
+#[test]
+fn lock_poison() {
+    loom::model(|| {
+        let lock = Arc::new(Lock::default());
+
+        lock.lock_sync();
+
+        let lock_clone = lock.clone();
+        let thread = spawn(move || {
+            if !lock_clone.share_sync() {
+                assert!(lock_clone.is_poisoned(Relaxed));
+            }
+        });
+
+        assert!(lock.poison_lock());
         assert!(thread.join().is_ok());
     });
 }
