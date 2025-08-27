@@ -100,6 +100,42 @@ fn lock_sync() {
 }
 
 #[test]
+fn lock_wait_queue() {
+    let num_threads = 4;
+    let mut semaphores = Vec::new();
+    let check = Arc::new(AtomicUsize::new(0));
+    let lock = Arc::new(Lock::default());
+
+    lock.lock_sync();
+    semaphores.resize_with(num_threads + 1, || Semaphore::with_permits(0));
+
+    let mut threads = Vec::new();
+    let semaphores = Arc::new(semaphores);
+    for i in 0..num_threads {
+        let semaphores = semaphores.clone();
+        let check = check.clone();
+        let lock = lock.clone();
+        threads.push(thread::spawn(move || {
+            semaphores[i].acquire_sync();
+            lock.lock_sync_with(|| {
+                semaphores[i + 1].release();
+            });
+            assert_eq!(check.fetch_add(1, Relaxed), i);
+            lock.release_lock();
+        }));
+    }
+
+    semaphores[0].release();
+    semaphores[num_threads].acquire_sync();
+
+    assert!(lock.release_lock());
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+}
+
+#[test]
 fn lock_sync_wait_callback() {
     let num_threads = if cfg!(miri) {
         4

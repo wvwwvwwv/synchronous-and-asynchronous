@@ -27,6 +27,34 @@ impl Semaphore {
     /// Maximum number of concurrent owners.
     pub const MAX_PERMITS: usize = WaitQueue::DATA_MASK;
 
+    /// Creates a new [`Semaphore`] with the given number of initially available permits.
+    ///
+    /// The maximum number of available permits is [`MAX_PERMITS`](Self::MAX_PERMITS), and if a
+    /// value greater than or equal to [`MAX_PERMITS`](Self::MAX_PERMITS) is provided, it will be
+    /// set to [`MAX_PERMITS`](Self::MAX_PERMITS).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::with_permits(11);
+    ///
+    /// assert_eq!(semaphore.available_permits(Relaxed), 11);
+    ///
+    /// assert!(semaphore.try_acquire_many(11));
+    /// assert!(!semaphore.is_open(Relaxed));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn with_permits(permits: usize) -> Self {
+        let adjusted_permits = permits.min(Self::MAX_PERMITS);
+        Self {
+            state: AtomicUsize::new(Self::MAX_PERMITS - adjusted_permits),
+        }
+    }
+
     /// Returns `true` if the semaphore is currently open.
     ///
     /// # Examples
@@ -383,7 +411,7 @@ impl Semaphore {
         }
     }
 
-    /// Tries to acquire a shared lock.
+    /// Tries to acquire a permit.
     fn try_acquire_internal(&self, count: usize) -> (bool, usize) {
         let mut state = self.state.load(Acquire);
         loop {

@@ -39,7 +39,7 @@ impl Lock {
     /// Could not acquire the desired lock.
     const NOT_ACQUIRED: u8 = 1_u8;
 
-    /// Poisoned error code;
+    /// Poisoned error code.
     const POISONED: u8 = 2_u8;
 
     /// Returns `true` if the lock is currently free.

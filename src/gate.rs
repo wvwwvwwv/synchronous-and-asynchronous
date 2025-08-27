@@ -1,5 +1,5 @@
-//! [`Gate`] is a synchronization primitive that blocks tasks to enter a critical section until they
-//! are allowed to do so.
+//! [`Gate`] is a synchronization primitive that blocks tasks from entering a critical section until
+//! they are allowed to do so.
 
 #![deny(unsafe_code)]
 
@@ -16,8 +16,8 @@ use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::WaitQueue;
 
-/// [`Gate`] is a synchronization primitive that blocks tasks to enter a critical section until they
-/// are allowed to do so.
+/// [`Gate`] is a synchronization primitive that blocks tasks from entering a critical section until
+/// they are allowed to do so.
 #[derive(Debug, Default)]
 pub struct Gate {
     /// [`Gate`] state.
@@ -36,7 +36,7 @@ pub struct Pager<'g> {
 /// [`Gate`] can be in one of three states.
 ///
 /// * `Controlled` - The default state where tasks can enter the [`Gate`] if permitted.
-/// * `Sealed` - The [`Gate`] is sealed and tasks immediately get rejected to enter it.
+/// * `Sealed` - The [`Gate`] is sealed and tasks immediately get rejected when attempting to enter.
 /// * `Open` - The [`Gate`] is open and tasks can immediately enter it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -177,7 +177,7 @@ impl Gate {
     /// Rejects waiting tasks to enter the [`Gate`] if the [`Gate`] is in a
     /// [`Controlled`](State::Controlled) state.
     ///
-    /// Returns the number of permitted tasks.
+    /// Returns the number of rejected tasks.
     ///
     /// # Errors
     ///
@@ -247,7 +247,8 @@ impl Gate {
 
     /// Seals the [`Gate`] to disallow tasks to enter.
     ///
-    /// Returns the number of tasks that were waiting to enter the gate.
+    /// Returns the previous state of the [`Gate`] and the number of tasks that were waiting to
+    /// enter the gate.
     ///
     /// # Examples
     ///
@@ -272,7 +273,7 @@ impl Gate {
 
     /// Enters the [`Gate`] asynchronously.
     ///
-    /// Returns the number of tasks that were waiting to enter the gate.
+    /// Returns the current state of the [`Gate`].
     ///
     /// # Errors
     ///
@@ -299,9 +300,9 @@ impl Gate {
         self.enter_async_with(|| ()).await
     }
 
-    /// Enters the [`Gate`] synchronously with a wait callback provided.
+    /// Enters the [`Gate`] asynchronously with a wait callback provided.
     ///
-    /// Returns the number of tasks that were waiting to enter the gate.
+    /// Returns the current state of the [`Gate`].
     ///
     /// # Errors
     ///
@@ -338,7 +339,7 @@ impl Gate {
 
     /// Enters the [`Gate`] synchronously.
     ///
-    /// Returns the number of tasks that were waiting to enter the gate.
+    /// Returns the current state of the [`Gate`].
     ///
     /// # Errors
     ///
@@ -382,7 +383,7 @@ impl Gate {
 
     /// Enters the [`Gate`] synchronously with a wait callback provided.
     ///
-    /// Returns the number of tasks that were waiting to enter the gate.
+    /// Returns the current state of the [`Gate`].
     ///
     /// # Errors
     ///
@@ -432,7 +433,7 @@ impl Gate {
         pinned_pager.poll_sync()
     }
 
-    /// Registers a [`Pager`] to allow it get a permit to enter the [`Gate`] remotely.
+    /// Registers a [`Pager`] to allow it to get a permit to enter the [`Gate`] remotely.
     ///
     /// Returns `false` if the [`Pager`] was already registered.
     ///

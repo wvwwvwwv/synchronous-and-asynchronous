@@ -14,7 +14,7 @@ Low-level synchronization primitives that provide both synchronous and asynchron
 
 ## Lock
 
-`saa::Lock` is a Low-level shared-exclusive lock that provides both synchronous and asynchronous interfaces. Synchronous locking methods such as `lock_sync` or `lock_shared_sync` can be used with their asynchronous counterparts, `lock_exclusive_async` or `lock_shared_async`, at the same time. `saa::Lock` implements a heap-allocation-free fair wait queue that is shared among both synchronous and asynchronous methods.
+`saa::Lock` is a low-level shared-exclusive lock that provides both synchronous and asynchronous interfaces. Synchronous locking methods such as `lock_sync` or `share_sync` can be used with their asynchronous counterparts, `lock_async` or `share_async`, at the same time. `saa::Lock` implements a heap-allocation-free fair wait queue that is shared among both synchronous and asynchronous methods.
 
 ### Examples
 
@@ -65,7 +65,7 @@ async {
 
 ## Gate
 
-`saa::Gate` is an unbounded barrier that can be open of sealed manually whenever needed.
+`saa::Gate` is an unbounded barrier that can be open or sealed manually whenever needed.
 
 ### Examples
 

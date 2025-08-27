@@ -1,5 +1,9 @@
 # Changelog
 
+3.0.1
+
+* Minor improvements to documentation and metadata.
+
 3.0.0
 
 * Add a poisoned state to `saa::Lock`.
