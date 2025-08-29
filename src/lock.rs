@@ -561,7 +561,7 @@ impl Lock {
     fn try_lock_internal(&self) -> (u8, usize) {
         let Err(mut state) = self
             .state
-            .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Relaxed)
+            .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Acquire)
         else {
             return (Self::ACQUIRED, 0);
         };
@@ -579,7 +579,7 @@ impl Lock {
                     state,
                     state | WaitQueue::DATA_MASK,
                     Acquire,
-                    Relaxed,
+                    Acquire,
                 ) {
                     Ok(_) => return (Self::ACQUIRED, 0),
                     Err(new_state) => state = new_state,
@@ -590,7 +590,7 @@ impl Lock {
 
     /// Tries to acquire a shared lock.
     fn try_share_internal(&self) -> (u8, usize) {
-        let Err(mut state) = self.state.compare_exchange(0, 1, Acquire, Relaxed) else {
+        let Err(mut state) = self.state.compare_exchange(0, 1, Acquire, Acquire) else {
             return (Self::ACQUIRED, 0);
         };
 
@@ -606,7 +606,7 @@ impl Lock {
 
             match self
                 .state
-                .compare_exchange(state, state + 1, Acquire, Relaxed)
+                .compare_exchange(state, state + 1, Acquire, Acquire)
             {
                 Ok(_) => return (Self::ACQUIRED, 0),
                 Err(new_state) => state = new_state,

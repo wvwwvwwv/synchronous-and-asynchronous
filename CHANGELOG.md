@@ -1,5 +1,9 @@
 # Changelog
 
+3.0.2
+
+* Fix the `failure` load ordering when the lock is deliberately poisoned.
+
 3.0.1
 
 * Minor improvements to documentation and metadata.
