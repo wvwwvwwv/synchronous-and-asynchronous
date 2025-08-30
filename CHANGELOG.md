@@ -1,8 +1,8 @@
 # Changelog
 
-3.0.2
+3.0.2 - 3.0.3
 
-* Fix the `failure` load ordering when the lock is deliberately poisoned.
+* Fix the `failure` load ordering when the lock is deliberately poisoned, the gate is open/sealed, or the semaphore is closed after an event.
 
 3.0.1
 

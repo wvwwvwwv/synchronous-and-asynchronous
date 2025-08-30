@@ -424,7 +424,7 @@ impl Semaphore {
 
             match self
                 .state
-                .compare_exchange(state, state + count, Acquire, Relaxed)
+                .compare_exchange(state, state + count, Acquire, Acquire)
             {
                 Ok(_) => return (true, 0),
                 Err(new_state) => state = new_state,

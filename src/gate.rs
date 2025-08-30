@@ -555,7 +555,7 @@ impl Gate {
         if let Some((_, entry)) = entry.entry.as_ref() {
             let pinned_entry = Pin::new(entry);
             loop {
-                let state = self.state.load(Relaxed);
+                let state = self.state.load(Acquire);
                 match State::from(state & WaitQueue::DATA_MASK) {
                     State::Controlled => {
                         if let Some(returned) =
