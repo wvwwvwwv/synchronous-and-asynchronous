@@ -547,6 +547,7 @@ impl Gate {
     }
 
     /// Pushes the wait queue entry.
+    #[inline]
     fn push_wait_queue_entry<F: FnOnce()>(
         &self,
         entry: &mut Pin<&mut Pager>,

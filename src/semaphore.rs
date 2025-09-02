@@ -412,6 +412,7 @@ impl Semaphore {
     }
 
     /// Tries to acquire a permit.
+    #[inline]
     fn try_acquire_internal(&self, count: usize) -> (bool, usize) {
         let mut state = self.state.load(Acquire);
         loop {

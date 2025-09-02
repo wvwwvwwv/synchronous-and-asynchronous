@@ -558,14 +558,19 @@ impl Lock {
     }
 
     /// Tries to acquire an exclusive lock.
+    #[inline]
     fn try_lock_internal(&self) -> (u8, usize) {
-        let Err(mut state) = self
+        let Err(state) = self
             .state
             .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Acquire)
         else {
             return (Self::ACQUIRED, 0);
         };
+        self.try_lock_internal_slow(state)
+    }
 
+    /// Tries to acquire an exclusive lock, slowly.
+    fn try_lock_internal_slow(&self, mut state: usize) -> (u8, usize) {
         loop {
             if state == Self::POISONED_STATE {
                 return (Self::POISONED, state);
@@ -589,11 +594,16 @@ impl Lock {
     }
 
     /// Tries to acquire a shared lock.
+    #[inline]
     fn try_share_internal(&self) -> (u8, usize) {
-        let Err(mut state) = self.state.compare_exchange(0, 1, Acquire, Acquire) else {
+        let Err(state) = self.state.compare_exchange(0, 1, Acquire, Acquire) else {
             return (Self::ACQUIRED, 0);
         };
+        self.try_share_internal_slow(state)
+    }
 
+    /// Tries to acquire a shared lock, slowly.
+    fn try_share_internal_slow(&self, mut state: usize) -> (u8, usize) {
         loop {
             if state == Self::POISONED_STATE {
                 return (Self::POISONED, state);
