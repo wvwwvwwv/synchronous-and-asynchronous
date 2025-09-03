@@ -67,8 +67,8 @@ pub enum Error {
     NotRegistered = 16_u8,
     /// The wrong asynchronous/synchronous mode was used in a [`Pager`].
     WrongMode = 20_u8,
-    /// Unknown error.
-    Unknown = 24_u8,
+    /// The result is not ready.
+    NotReady = 24_u8,
 }
 
 impl Gate {
@@ -745,7 +745,7 @@ impl<'g> Pager<'g> {
     ///
     /// assert!(gate.register_sync(&mut pinned_pager));
     ///
-    /// assert_eq!(pinned_pager.try_poll(), Err(Error::Unknown));
+    /// assert_eq!(pinned_pager.try_poll(), Err(Error::NotReady));
     /// assert_eq!(gate.open().1, 1);
     ///
     /// assert_eq!(pinned_pager.try_poll(), Ok(State::Open));
@@ -762,7 +762,7 @@ impl<'g> Pager<'g> {
             let (state, error) = Gate::from_u8(result);
             error.map_or(Ok(state), Err)
         } else {
-            Err(Error::Unknown)
+            Err(Error::NotReady)
         }
     }
 }
@@ -839,7 +839,7 @@ impl From<Error> for u8 {
             Error::SpuriousFailure => 12_u8,
             Error::NotRegistered => 16_u8,
             Error::WrongMode => 20_u8,
-            Error::Unknown => 24_u8,
+            Error::NotReady => 24_u8,
         }
     }
 }
@@ -860,7 +860,7 @@ impl From<usize> for Error {
             12 => Error::SpuriousFailure,
             16 => Error::NotRegistered,
             20 => Error::WrongMode,
-            _ => Error::Unknown,
+            _ => Error::NotReady,
         }
     }
 }
