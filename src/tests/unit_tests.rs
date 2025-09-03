@@ -813,6 +813,9 @@ async fn gate_chaos() {
                             assert!(gate.register_async(&mut pinned_pager));
                         } else {
                             assert!(gate.register_sync(&mut pinned_pager));
+                            if let Ok(state) = pinned_pager.try_poll() {
+                                assert_eq!(pinned_pager.poll_sync(), Ok(state));
+                            }
                         }
                     } else {
                         match gate.enter_sync() {

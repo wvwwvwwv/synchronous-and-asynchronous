@@ -579,16 +579,19 @@ impl Gate {
     }
 
     /// Noop function.
+    #[inline]
     fn noop(_entry: &WaitQueue, _this_addr: usize) {
         unreachable!("Noop function called");
     }
 
     /// Converts `(State, Error)` into `u8`.
+    #[inline]
     fn into_u8(state: State, error: Option<Error>) -> u8 {
         u8::from(state) | error.map_or(0_u8, u8::from)
     }
 
     /// Converts `(State, Error)` into `u8`.
+    #[inline]
     fn from_u8(value: u8) -> (State, Option<Error>) {
         let state = State::from(value & Self::STATE_MASK);
         let error = value & !(Self::STATE_MASK);
@@ -706,6 +709,7 @@ impl<'g> Pager<'g> {
     ///
     /// assert_eq!(pinned_pager.poll_sync(), Ok(State::Open));
     /// ```
+    #[inline]
     pub fn poll_sync(self: &mut Pin<&mut Pager<'g>>) -> Result<State, Error> {
         let Some((_, entry)) = self.entry.as_ref() else {
             // The `Pager` is not registered in any `Gate`.
@@ -718,6 +722,48 @@ impl<'g> Pager<'g> {
         self.entry.take();
         let (state, error) = Gate::from_u8(result);
         error.map_or(Ok(state), Err)
+    }
+
+    /// Tries to get the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it failed to enter the [`Gate`] or the result is not ready.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::pin::Pin;
+    ///
+    /// use saa::Gate;
+    /// use saa::gate::{Error, Pager, State};
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let mut pager = Pager::default();
+    /// let mut pinned_pager = Pin::new(&mut pager);
+    ///
+    /// assert!(gate.register_sync(&mut pinned_pager));
+    ///
+    /// assert_eq!(pinned_pager.try_poll(), Err(Error::Unknown));
+    /// assert_eq!(gate.open().1, 1);
+    ///
+    /// assert_eq!(pinned_pager.try_poll(), Ok(State::Open));
+    /// assert_eq!(pinned_pager.poll_sync(), Ok(State::Open));
+    /// ```
+    #[inline]
+    pub fn try_poll(&self) -> Result<State, Error> {
+        let Some((_, entry)) = self.entry.as_ref() else {
+            // The `Pager` is not registered in any `Gate`.
+            return Err(Error::NotRegistered);
+        };
+
+        if let Some(result) = entry.try_acknowledge_result() {
+            let (state, error) = Gate::from_u8(result);
+            error.map_or(Ok(state), Err)
+        } else {
+            Err(Error::Unknown)
+        }
     }
 }
 

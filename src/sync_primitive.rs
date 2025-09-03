@@ -384,6 +384,7 @@ pub(crate) trait SyncPrimitive: Sized {
 
 impl Opcode {
     /// Checks if the resourced expressed in `self` can be released from `state`.
+    #[inline]
     pub(crate) const fn can_release(self, state: usize) -> bool {
         match self {
             Opcode::Exclusive => {
@@ -405,6 +406,7 @@ impl Opcode {
 
     /// Converts the operation mode into a `usize` value representing resources held by the
     /// corresponding synchronization primitive.
+    #[inline]
     pub(crate) const fn release_count(self) -> usize {
         match self {
             Opcode::Exclusive => WaitQueue::DATA_MASK,

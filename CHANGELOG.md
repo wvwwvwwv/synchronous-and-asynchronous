@@ -1,5 +1,9 @@
 # Changelog
 
+3.1.0
+
+* Add `gate::Pager::try_poll`.
+
 3.0.4
 
 * Inline trivial methods.
