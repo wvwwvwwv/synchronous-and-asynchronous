@@ -1,5 +1,9 @@
 # Changelog
 
+3.2.0
+
+* Remove internal use of `Mutex` in the wait queue.
+
 3.1.0
 
 * Add `gate::Pager::try_poll`.

@@ -1,22 +1,19 @@
 //! Wait queue implementation.
 
+use std::cell::UnsafeCell;
 use std::future::Future;
 use std::mem::align_of;
 use std::pin::Pin;
 use std::ptr::{from_ref, null_mut, with_exposed_provenance};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 #[cfg(not(feature = "loom"))]
-use std::sync::Mutex;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-#[cfg(not(feature = "loom"))]
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8};
+use std::sync::atomic::{AtomicPtr, AtomicU16};
 use std::task::{Context, Poll, Waker};
 #[cfg(not(feature = "loom"))]
 use std::thread::{Thread, current, park, yield_now};
 
 #[cfg(feature = "loom")]
-use loom::sync::Mutex;
-#[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8};
+use loom::sync::atomic::{AtomicPtr, AtomicU16};
 #[cfg(feature = "loom")]
 use loom::thread::{Thread, current, park, yield_now};
 
@@ -26,7 +23,7 @@ use crate::opcode::Opcode;
 ///
 /// [`WaitQueue`] itself forms an intrusive linked list of entries where entries are pushed at the
 /// tail and popped from the head. [`WaitQueue`] is `128-byte` aligned thus allowing the lower 7
-/// bits in a pointer-sized scalar type variable to represent additional states.
+/// bits to denote additional states.
 #[repr(align(128))]
 #[derive(Debug)]
 pub(crate) struct WaitQueue {
@@ -36,14 +33,8 @@ pub(crate) struct WaitQueue {
     prev_entry_ptr: AtomicPtr<Self>,
     /// Operation type.
     opcode: Opcode,
-    /// Operation result.
-    result: AtomicU8,
-    /// Result is set.
-    ready: AtomicBool,
-    /// The result is finalized, and other threads will not access the context.
-    finalized: AtomicBool,
-    /// The result has been acknowledged.
-    acknowledged: AtomicBool,
+    /// Operation state.
+    state: AtomicU16,
     /// Monitors the result.
     monitor: Monitor,
 }
@@ -55,7 +46,7 @@ pub(crate) struct PinnedWaitQueue<'w>(pub(crate) Pin<&'w WaitQueue>);
 #[derive(Debug)]
 struct AsyncContext {
     /// Waker to wake an executor when the result is ready.
-    waker: Mutex<Option<Waker>>,
+    waker: UnsafeCell<Option<Waker>>,
     /// Context cleaner when an asynchronous [`WaitQueue`] is cancelled.
     cleaner: fn(&WaitQueue, usize),
     /// Argument to pass to the cleaner function.
@@ -66,7 +57,7 @@ struct AsyncContext {
 #[derive(Debug)]
 struct SyncContext {
     /// Waker to wake an executor when the result is ready.
-    thread: Mutex<Option<Thread>>,
+    thread: UnsafeCell<Option<Thread>>,
 }
 
 /// Monitors the result.
@@ -91,10 +82,22 @@ impl WaitQueue {
     /// Mask to extract the memory address part from a `usize` value.
     pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
 
+    /// Indicates that a result is set.
+    const RESULT_SET: u16 = 1_u16 << u8::BITS;
+
+    /// Indicates that a waker is set.
+    const WAKER_SET: u16 = 1_u16 << (u8::BITS + 1);
+
+    /// Indicates that a result is finalized.
+    const RESULT_FINALIZED: u16 = 1_u16 << (u8::BITS + 2);
+
+    /// Indicates that a result is acknowledged.
+    const RESULT_ACKED: u16 = 1_u16 << (u8::BITS + 3);
+
     /// Creates a new [`WaitQueue`] for asynchronous method.
     pub(crate) fn new_async(opcode: Opcode, cleaner: fn(&WaitQueue, usize), arg: usize) -> Self {
         let monitor = Monitor::Async(AsyncContext {
-            waker: Mutex::new(None),
+            waker: UnsafeCell::new(None),
             cleaner,
             cleaner_arg: arg,
         });
@@ -102,10 +105,7 @@ impl WaitQueue {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
             opcode,
-            result: AtomicU8::new(0),
-            ready: AtomicBool::new(false),
-            finalized: AtomicBool::new(false),
-            acknowledged: AtomicBool::new(false),
+            state: AtomicU16::new(0),
             monitor,
         }
     }
@@ -113,16 +113,13 @@ impl WaitQueue {
     /// Creates a new [`WaitQueue`] for synchronous method.
     pub(crate) fn new_sync(opcode: Opcode) -> Self {
         let monitor = Monitor::Sync(SyncContext {
-            thread: Mutex::new(None),
+            thread: UnsafeCell::new(None),
         });
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
             opcode,
-            result: AtomicU8::new(0),
-            ready: AtomicBool::new(false),
-            finalized: AtomicBool::new(false),
-            acknowledged: AtomicBool::new(false),
+            state: AtomicU16::new(0),
             monitor,
         }
     }
@@ -237,29 +234,44 @@ impl WaitQueue {
 
     /// Sets the result to the entry.
     pub(crate) fn set_result(&self, result: u8) {
-        debug_assert!(!self.finalized.load(Relaxed));
-        self.result.store(result, Release);
-        self.ready.store(true, Release);
+        let mut state = self.state.load(Acquire);
+        loop {
+            debug_assert_eq!(state & Self::RESULT_SET, 0);
 
-        match &self.monitor {
-            Monitor::Async(async_context) => {
-                // Try-locking is sufficient.
-                if let Ok(mut waker) = async_context.waker.lock() {
-                    if let Some(waker) = waker.take() {
-                        waker.wake();
-                    }
+            // Once the result is set, a waker cannot be set.
+            let next_state = (state | Self::RESULT_SET) | u16::from(result);
+            match self
+                .state
+                .compare_exchange_weak(state, next_state, AcqRel, Acquire)
+            {
+                Ok(_) => {
+                    state = next_state;
+                    break;
                 }
+                Err(new_state) => state = new_state,
             }
-            Monitor::Sync(sync_context) => {
-                if let Ok(mut thread) = sync_context.thread.lock() {
-                    if let Some(thread) = thread.take() {
-                        thread.unpark();
+        }
+
+        if state & Self::WAKER_SET == Self::WAKER_SET {
+            // A waker had been set before the result was set.
+            unsafe {
+                match &self.monitor {
+                    Monitor::Async(async_context) => {
+                        if let Some(waker) = (*async_context.waker.get()).take() {
+                            waker.wake();
+                        }
+                    }
+                    Monitor::Sync(sync_context) => {
+                        if let Some(thread) = (*sync_context.thread.get()).take() {
+                            thread.unpark();
+                        }
                     }
                 }
             }
         }
 
-        self.finalized.store(true, Release);
+        debug_assert_eq!(state & Self::RESULT_FINALIZED, 0);
+        self.state.fetch_or(Self::RESULT_FINALIZED, Release);
     }
 
     /// Polls the result, asynchronously.
@@ -272,23 +284,38 @@ impl WaitQueue {
             return Poll::Ready(result);
         }
 
-        let mut this_waker = Some(cx.waker().clone());
-        if self.ready.load(Acquire) {
+        let mut this_waker = None;
+        let state = self.state.load(Acquire);
+        if state & Self::RESULT_SET == Self::RESULT_SET {
             // No need to install the waker.
             if let Some(result) = self.try_acknowledge_result() {
                 return Poll::Ready(result);
             }
-        } else if let Ok(mut waker) = async_context.waker.lock() {
-            if !self.ready.load(Acquire) {
-                *waker = this_waker.take();
+        } else if state & Self::WAKER_SET == Self::WAKER_SET {
+            // Replace the waker by clearing the flag first.
+            if self
+                .state
+                .compare_exchange_weak(state, state & !Self::WAKER_SET, AcqRel, Acquire)
+                .is_ok()
+            {
+                this_waker.replace(cx.waker().clone());
             }
+        } else {
+            this_waker.replace(cx.waker().clone());
         }
 
-        if let Some(result) = self.try_acknowledge_result() {
-            return Poll::Ready(result);
-        }
         if let Some(waker) = this_waker {
-            waker.wake();
+            unsafe {
+                (*async_context.waker.get()).replace(waker);
+            }
+            if self.state.fetch_or(Self::WAKER_SET, Release) & Self::RESULT_SET == Self::RESULT_SET
+            {
+                // The result has been set, so the waker will not be notified.
+                cx.waker().wake_by_ref();
+            }
+        } else {
+            // The waker is not set, so need to wake the task.
+            cx.waker().wake_by_ref();
         }
 
         Poll::Pending
@@ -305,39 +332,55 @@ impl WaitQueue {
                 return result;
             }
 
-            let mut this_thread = Some(current());
-            if self.ready.load(Acquire) {
-                // No need to install the waker.
+            let mut this_thread = None;
+            let state = self.state.load(Acquire);
+            if state & Self::RESULT_SET == Self::RESULT_SET {
+                // No need to install the thread.
                 if let Some(result) = self.try_acknowledge_result() {
                     return result;
                 }
-            } else if let Ok(mut thread) = sync_context.thread.lock() {
-                if !self.ready.load(Acquire) {
-                    *thread = this_thread.take();
+            } else if state & Self::WAKER_SET == Self::WAKER_SET {
+                // Replace the thread by clearing the flag first.
+                if self
+                    .state
+                    .compare_exchange_weak(state, state & !Self::WAKER_SET, AcqRel, Acquire)
+                    .is_ok()
+                {
+                    this_thread.replace(current());
                 }
+            } else {
+                this_thread.replace(current());
             }
 
-            if let Some(result) = self.try_acknowledge_result() {
-                return result;
-            }
-            if this_thread.is_some() {
-                yield_now();
+            if let Some(thread) = this_thread {
+                unsafe {
+                    (*sync_context.thread.get()).replace(thread);
+                }
+                if self.state.fetch_or(Self::WAKER_SET, Release) & Self::RESULT_SET
+                    == Self::RESULT_SET
+                {
+                    // The result has been set, so the thread will not be signaled.
+                    yield_now();
+                } else {
+                    park();
+                }
             } else {
-                park();
+                // The thread is not set, so need to yield the thread.
+                yield_now();
             }
         }
     }
 
     /// Sets the result as acknowledged if pushing the entry into the wait queue failed.
     pub(crate) fn result_acknowledged(&self) {
-        debug_assert!(!self.acknowledged.load(Relaxed));
-        self.acknowledged.store(true, Release);
+        debug_assert_eq!(self.state.load(Relaxed) & Self::RESULT_ACKED, 0);
+        self.state.fetch_or(Self::RESULT_ACKED, Release);
     }
 
     /// Returns `true` if the result has been finalized.
     pub(crate) fn result_finalized(&self) -> bool {
-        debug_assert!(!self.acknowledged.load(Relaxed));
-        self.finalized.load(Acquire)
+        let state = self.state.load(Acquire);
+        state & Self::RESULT_FINALIZED == Self::RESULT_FINALIZED
     }
 
     /// Tries to get the result and acknowledges it.
@@ -352,11 +395,13 @@ impl WaitQueue {
 
     /// Tries to get the result and acknowledges it.
     pub(crate) fn try_acknowledge_result(&self) -> Option<u8> {
-        self.finalized.load(Acquire).then(|| {
-            debug_assert!(self.ready.load(Relaxed));
-            self.acknowledged.store(true, Release);
-            self.result.load(Relaxed)
-        })
+        let state = self.state.load(Acquire);
+        if state & Self::RESULT_FINALIZED == Self::RESULT_FINALIZED {
+            debug_assert_ne!(state & Self::RESULT_SET, 0);
+            self.state.fetch_or(Self::RESULT_ACKED, Release);
+            return u8::try_from(state & ((1_u16 << u8::BITS) - 1)).ok();
+        }
+        None
     }
 }
 
@@ -366,7 +411,7 @@ impl Drop for WaitQueue {
         let Monitor::Async(async_context) = &self.monitor else {
             return;
         };
-        if !self.acknowledged.load(Acquire) {
+        if self.state.load(Acquire) & Self::RESULT_ACKED == 0 {
             (async_context.cleaner)(self, async_context.cleaner_arg);
         }
     }
@@ -381,3 +426,6 @@ impl Future for PinnedWaitQueue<'_> {
         this.0.poll_result_async(cx)
     }
 }
+
+unsafe impl Send for Monitor {}
+unsafe impl Sync for Monitor {}
