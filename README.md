@@ -4,17 +4,16 @@
 ![Crates.io](https://img.shields.io/crates/l/saa)
 ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/wvwwvwwv/synchronous-and-asynchronous/saa.yml?branch=main)
 
-Low-level synchronization primitives that provide both synchronous and asynchronous interfaces.
+Low-level synchronization primitives providing both asynchronous and synchronous interfaces.
 
 ## Features
 
-- Asynchronous counterparts of synchronous methods.
+- Provides both asynchronous and synchronous interfaces.
 - [`Loom`](https://github.com/tokio-rs/loom) support: `features = ["loom"]`.
-- No spin-locks and no busy loops, except for when an asynchronous task waiting for a resource gets cancelled.
 
 ## Lock
 
-`saa::Lock` is a low-level shared-exclusive lock that provides both synchronous and asynchronous interfaces. Synchronous locking methods such as `lock_sync` or `share_sync` can be used with their asynchronous counterparts, `lock_async` or `share_async`, at the same time. `saa::Lock` implements a heap-allocation-free fair wait queue that is shared among both synchronous and asynchronous methods.
+`saa::Lock` is a low-level shared-exclusive lock providing both asynchronous and synchronous interfaces. Synchronous locking methods such as `lock_sync` and `share_sync` can be used alongside their asynchronous counterparts `lock_async` and `share_async` simultaneously. `saa::Lock` implements a heap-allocation-free fair wait queue shared between both synchronous and asynchronous methods.
 
 ### Examples
 
@@ -65,7 +64,7 @@ async {
 
 ## Gate
 
-`saa::Gate` is an unbounded barrier that can be open or sealed manually whenever needed.
+`saa::Gate` is an unbounded barrier that can be opened or sealed manually as needed.
 
 ### Examples
 
@@ -101,11 +100,11 @@ for thread in threads {
 
 ## Notes
 
-Use of synchronous methods in an asynchronous context may lead to a deadlock. Suppose a scenario where an asynchronous runtime provides two threads executing three tasks.
+Using synchronous methods in an asynchronous context may lead to deadlocks. Consider a scenario where an asynchronous runtime uses two threads to execute three tasks.
 
 * ThreadId(0): `task-0: share-waiting / pending` || `task-1: "synchronous"-lock-waiting`.
 * ThreadId(1): `task-2: release-lock / ready: wake-up task-0` -> `task-2: lock-waiting / pending`.
 
-In the above example, `task-0` logically has acquired a shared lock which was transferred from `task-2`, however, it may remain in the task queue indefinitely, depending on the scheduling policy of the asynchronous runtime.
+In this example, `task-0` has logically acquired a shared lock transferred from `task-2`; however, it may remain in the task queue indefinitely depending on the asynchronous runtime's scheduling policy.
 
 ## [Changelog](https://github.com/wvwwvwwv/synchronous-and-asynchronous/blob/main/CHANGELOG.md)
