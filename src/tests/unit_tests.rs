@@ -58,7 +58,7 @@ fn lock_sync() {
     } else {
         Lock::MAX_SHARED_OWNERS
     };
-    let num_iters = if cfg!(miri) { 16 } else { 256 };
+    let num_iters = if cfg!(miri) { 32 } else { 256 };
     let check = Arc::new(AtomicUsize::new(0));
     let lock = Arc::new(Lock::default());
 
@@ -447,7 +447,7 @@ fn semaphore_sync() {
     } else {
         Semaphore::MAX_PERMITS
     };
-    let num_iters = if cfg!(miri) { 16 } else { 256 };
+    let num_iters = if cfg!(miri) { 32 } else { 256 };
     let check = Arc::new(AtomicUsize::new(0));
     let semaphore = Arc::new(Semaphore::default());
 
@@ -601,7 +601,7 @@ async fn gate_async() {
 #[test]
 fn gate_sync() {
     let num_threads = if cfg!(miri) { 4 } else { 16 };
-    let num_iters = if cfg!(miri) { 16 } else { 256 };
+    let num_iters = if cfg!(miri) { 32 } else { 256 };
     let gate = Arc::new(Gate::default());
 
     let mut threads = Vec::new();

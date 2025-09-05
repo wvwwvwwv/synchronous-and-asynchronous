@@ -237,6 +237,7 @@ impl WaitQueue {
         let mut state = self.state.load(Acquire);
         loop {
             debug_assert_eq!(state & Self::RESULT_SET, 0);
+            debug_assert_eq!(state & Self::RESULT_FINALIZED, 0);
 
             // Once the result is set, a waker cannot be set.
             let next_state = (state | Self::RESULT_SET) | u16::from(result);
@@ -258,19 +259,21 @@ impl WaitQueue {
                 match &self.monitor {
                     Monitor::Async(async_context) => {
                         if let Some(waker) = (*async_context.waker.get()).take() {
+                            self.state.fetch_or(Self::RESULT_FINALIZED, Release);
                             waker.wake();
+                            return;
                         }
                     }
                     Monitor::Sync(sync_context) => {
                         if let Some(thread) = (*sync_context.thread.get()).take() {
+                            self.state.fetch_or(Self::RESULT_FINALIZED, Release);
                             thread.unpark();
+                            return;
                         }
                     }
                 }
             }
         }
-
-        debug_assert_eq!(state & Self::RESULT_FINALIZED, 0);
         self.state.fetch_or(Self::RESULT_FINALIZED, Release);
     }
 
