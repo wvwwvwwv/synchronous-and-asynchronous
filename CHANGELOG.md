@@ -1,5 +1,9 @@
 # Changelog
 
+3.2.1
+
+* Minor optimization.
+
 3.2.0
 
 * Remove internal use of `Mutex` in the wait queue.

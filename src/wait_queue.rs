@@ -169,8 +169,8 @@ impl WaitQueue {
         with_exposed_provenance(wait_queue_addr)
     }
 
-    /// Installs a pointer to the previous entry on each entry by forward-iterating over entries.
-    pub(crate) fn install_backward_link(tail_entry_ptr: *const Self) {
+    /// Sets a pointer to the previous entry on each entry by forward-iterating over entries.
+    pub(crate) fn set_prev_ptr(tail_entry_ptr: *const Self) {
         let mut entry_ptr = tail_entry_ptr;
         while !entry_ptr.is_null() {
             entry_ptr = unsafe {
@@ -191,14 +191,17 @@ impl WaitQueue {
     /// Forward-iterates over entries, and returns `true` when the supplied closure returns `true`.
     pub(crate) fn iter_forward<F: FnMut(&Self, Option<&Self>) -> bool>(
         tail_entry_ptr: *const Self,
+        set_prev: bool,
         mut f: F,
     ) {
         let mut entry_ptr = tail_entry_ptr;
         while !entry_ptr.is_null() {
             entry_ptr = unsafe {
                 let next_entry_ptr = (*entry_ptr).next_entry_ptr();
-                if let Some(next_entry) = next_entry_ptr.as_ref() {
-                    next_entry.update_prev_entry_ptr(entry_ptr);
+                if set_prev {
+                    if let Some(next_entry) = next_entry_ptr.as_ref() {
+                        next_entry.update_prev_entry_ptr(entry_ptr);
+                    }
                 }
 
                 // The result is set here, so the scope should be protected.

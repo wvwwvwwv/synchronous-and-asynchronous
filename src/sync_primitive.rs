@@ -121,46 +121,19 @@ pub(crate) trait SyncPrimitive: Sized {
                 }
             } else {
                 // The wait queue is not empty and not being processed.
-                match self.try_start_process_wait_queue(state, mode) {
-                    Ok(new_state) => {
-                        self.process_wait_queue(new_state);
-                        return true;
-                    }
-                    Err(new_state) => state = new_state,
+                let next_state = (state | WaitQueue::LOCKED_FLAG) - mode.release_count();
+                if let Err(new_state) = self
+                    .state()
+                    .compare_exchange(state, next_state, AcqRel, Relaxed)
+                {
+                    state = new_state;
+                    continue;
                 }
+                self.process_wait_queue(next_state);
+                return true;
             }
         }
         false
-    }
-
-    /// Tries to start processing the wait queue by releasing a resource of the specified type and
-    /// locking the wait queue.
-    ///
-    /// Returns the updated state if successful, or returns the latest state as an error if another
-    /// thread was processing the wait queue or the resource could not be released.
-    fn try_start_process_wait_queue(&self, mut state: usize, mode: Opcode) -> Result<usize, usize> {
-        if state & WaitQueue::ADDR_MASK == 0
-            || state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG
-            || !mode.can_release(state)
-        {
-            return Err(state);
-        }
-
-        let mut next_state = (state | WaitQueue::LOCKED_FLAG) - mode.release_count();
-        while let Err(new_state) = self
-            .state()
-            .compare_exchange(state, next_state, AcqRel, Relaxed)
-        {
-            if new_state & WaitQueue::ADDR_MASK == 0
-                || new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG
-                || !mode.can_release(state)
-            {
-                return Err(new_state);
-            }
-            state = new_state;
-            next_state = (state | WaitQueue::LOCKED_FLAG) - mode.release_count();
-        }
-        Ok(next_state)
     }
 
     /// Processes the wait queue.
@@ -172,12 +145,12 @@ pub(crate) trait SyncPrimitive: Sized {
 
             let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
             if head_entry_ptr.is_null() {
-                WaitQueue::iter_forward(tail_entry_ptr, |entry, next_entry| {
+                WaitQueue::iter_forward(tail_entry_ptr, true, |entry, next_entry| {
                     head_entry_ptr = WaitQueue::ref_to_ptr(entry);
                     next_entry.is_none()
                 });
             } else {
-                WaitQueue::install_backward_link(tail_entry_ptr);
+                WaitQueue::set_prev_ptr(tail_entry_ptr);
             }
 
             let data = state & WaitQueue::DATA_MASK;
@@ -245,7 +218,7 @@ pub(crate) trait SyncPrimitive: Sized {
                 state = self.state().fetch_add(transferred, AcqRel) + transferred;
             }
 
-            WaitQueue::iter_forward(resolved_entry_ptr, |entry, _next_entry| {
+            WaitQueue::iter_forward(resolved_entry_ptr, false, |entry, _next_entry| {
                 entry.set_result(0);
                 false
             });
@@ -266,7 +239,7 @@ pub(crate) trait SyncPrimitive: Sized {
             debug_assert_ne!(state & WaitQueue::ADDR_MASK, 0);
 
             let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
-            WaitQueue::iter_forward(tail_entry_ptr, |entry, next_entry| {
+            WaitQueue::iter_forward(tail_entry_ptr, true, |entry, next_entry| {
                 if WaitQueue::ref_to_ptr(entry) == target_ptr {
                     let prev_entry_ptr = entry.prev_entry_ptr();
                     if let Some(next_entry) = next_entry {
@@ -320,35 +293,32 @@ pub(crate) trait SyncPrimitive: Sized {
         let mut state = this.state().load(Acquire);
         let mut need_completion = false;
         loop {
-            match this.try_start_process_wait_queue(state, Opcode::Wait) {
-                Ok(new_state) => state = new_state,
-                Err(new_state) => {
-                    if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
-                        // Another thread is processing the wait queue.
-                        thread::yield_now();
-                        state = this.state().load(Acquire);
-                        continue;
-                    }
-
-                    // The wait queue is empty.
-                    debug_assert_eq!(new_state & WaitQueue::LOCKED_FLAG, 0);
-                    debug_assert_eq!(new_state & WaitQueue::ADDR_MASK, 0);
-                    state = new_state;
+            if state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
+                // Another thread is processing the wait queue.
+                thread::yield_now();
+                state = this.state().load(Acquire);
+            } else if state & WaitQueue::ADDR_MASK == 0 {
+                // The wait queue is empty.
+                need_completion = true;
+                break;
+            } else if let Err(new_state) = this.state().compare_exchange(
+                state,
+                state | WaitQueue::LOCKED_FLAG,
+                AcqRel,
+                Acquire,
+            ) {
+                state = new_state;
+            } else {
+                let (new_state, removed) =
+                    this.remove_wait_queue_entry(state | WaitQueue::LOCKED_FLAG, wait_queue_addr);
+                if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
+                    // Need to process the wait queue if it is still locked.
+                    this.process_wait_queue(new_state);
+                }
+                if !removed {
                     need_completion = true;
                 }
-            }
-            break;
-        }
-
-        if state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
-            let (new_state, removed) = this.remove_wait_queue_entry(state, wait_queue_addr);
-            if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
-                // Need to process the wait queue if it is still locked.
-                this.process_wait_queue(new_state);
-            }
-
-            if !removed {
-                need_completion = true;
+                break;
             }
         }
 

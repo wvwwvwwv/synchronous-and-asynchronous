@@ -535,11 +535,15 @@ impl Gate {
                 let next_state = next_state.unwrap_or(prev_state);
                 let result = Self::into_u8(next_state, error);
                 if entry_addr != 0 {
-                    WaitQueue::iter_forward(WaitQueue::addr_to_ptr(entry_addr), |entry, _| {
-                        entry.set_result(result);
-                        count += 1;
-                        false
-                    });
+                    WaitQueue::iter_forward(
+                        WaitQueue::addr_to_ptr(entry_addr),
+                        false,
+                        |entry, _| {
+                            entry.set_result(result);
+                            count += 1;
+                            false
+                        },
+                    );
                 }
                 (prev_state, count)
             }

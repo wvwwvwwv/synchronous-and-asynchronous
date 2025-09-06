@@ -646,10 +646,14 @@ impl Lock {
                 Ok(prev_state) => {
                     let entry_addr = prev_state & WaitQueue::ADDR_MASK;
                     if entry_addr != 0 {
-                        WaitQueue::iter_forward(WaitQueue::addr_to_ptr(entry_addr), |entry, _| {
-                            entry.set_result(Self::POISONED);
-                            false
-                        });
+                        WaitQueue::iter_forward(
+                            WaitQueue::addr_to_ptr(entry_addr),
+                            false,
+                            |entry, _| {
+                                entry.set_result(Self::POISONED);
+                                false
+                            },
+                        );
                     }
 
                     return true;
