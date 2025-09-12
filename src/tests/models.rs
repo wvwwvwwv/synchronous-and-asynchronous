@@ -19,15 +19,24 @@ fn lock_shared() {
 
         let lock_clone = lock.clone();
         let check_clone = check.clone();
-        let thread = spawn(move || {
+        let thread_1 = spawn(move || {
             assert!(lock_clone.share_sync());
             assert!(check_clone.load(Relaxed));
-            assert!(lock_clone.release_share());
+        });
+
+        let lock_clone = lock.clone();
+        let check_clone = check.clone();
+        let thread_2 = spawn(move || {
+            assert!(lock_clone.share_sync());
+            assert!(check_clone.load(Relaxed));
         });
 
         check.store(true, Relaxed);
         assert!(lock.release_lock());
-        assert!(thread.join().is_ok());
+        assert!(thread_1.join().is_ok());
+        assert!(thread_2.join().is_ok());
+        assert!(lock.release_share());
+        assert!(lock.release_share());
     });
 }
 
@@ -41,7 +50,15 @@ fn lock_exclusive() {
 
         let lock_clone = lock.clone();
         let check_clone = check.clone();
-        let thread = spawn(move || {
+        let thread_1 = spawn(move || {
+            assert!(lock_clone.lock_sync());
+            assert!(check_clone.load(Relaxed));
+            assert!(lock_clone.release_lock());
+        });
+
+        let lock_clone = lock.clone();
+        let check_clone = check.clone();
+        let thread_2 = spawn(move || {
             assert!(lock_clone.lock_sync());
             assert!(check_clone.load(Relaxed));
             assert!(lock_clone.release_lock());
@@ -49,7 +66,8 @@ fn lock_exclusive() {
 
         check.store(true, Relaxed);
         assert!(lock.release_share());
-        assert!(thread.join().is_ok());
+        assert!(thread_1.join().is_ok());
+        assert!(thread_2.join().is_ok());
     });
 }
 
@@ -61,14 +79,22 @@ fn share_poison() {
         lock.lock_sync();
 
         let lock_clone = lock.clone();
-        let thread = spawn(move || {
+        let thread_1 = spawn(move || {
+            if !lock_clone.share_sync() {
+                assert!(lock_clone.is_poisoned(Relaxed));
+            }
+        });
+
+        let lock_clone = lock.clone();
+        let thread_2 = spawn(move || {
             if !lock_clone.share_sync() {
                 assert!(lock_clone.is_poisoned(Relaxed));
             }
         });
 
         assert!(lock.poison_lock());
-        assert!(thread.join().is_ok());
+        assert!(thread_1.join().is_ok());
+        assert!(thread_2.join().is_ok());
     });
 }
 
@@ -139,6 +165,20 @@ fn gate_enter() {
             }
             yield_now();
         }
+        assert!(thread.join().is_ok());
+    });
+}
+
+#[test]
+fn gate_seal() {
+    loom::model(|| {
+        let gate = Arc::new(Gate::default());
+        let gate_clone = gate.clone();
+        let thread = spawn(move || {
+            assert_eq!(gate_clone.enter_sync(), Err(gate::Error::Sealed));
+        });
+
+        gate.seal();
         assert!(thread.join().is_ok());
     });
 }
