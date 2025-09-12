@@ -644,6 +644,10 @@ impl Lock {
                 .compare_exchange(state, Self::POISONED_STATE, AcqRel, Relaxed)
             {
                 Ok(prev_state) => {
+                    // A possible data race where the lock is being poisoned before the one that
+                    // woke up the current lock owner has finished processing the wate queue is
+                    // prevented by the wait queue processing method itself; `model.rs` proves it.
+                    debug_assert_eq!(prev_state & WaitQueue::LOCKED_FLAG, 0);
                     let entry_addr = prev_state & WaitQueue::ADDR_MASK;
                     if entry_addr != 0 {
                         WaitQueue::iter_forward(

@@ -54,7 +54,7 @@ fn lock_exclusive() {
 }
 
 #[test]
-fn lock_poison() {
+fn share_poison() {
     loom::model(|| {
         let lock = Arc::new(Lock::default());
 
@@ -69,6 +69,36 @@ fn lock_poison() {
 
         assert!(lock.poison_lock());
         assert!(thread.join().is_ok());
+    });
+}
+
+#[test]
+fn lock_poison() {
+    loom::model(|| {
+        let lock = Arc::new(Lock::default());
+
+        lock.lock_sync();
+
+        let lock_clone = lock.clone();
+        let thread_1 = spawn(move || {
+            assert!(lock_clone.lock_sync());
+            assert!(lock_clone.poison_lock());
+        });
+
+        let lock_clone = lock.clone();
+        let thread_2 = spawn(move || {
+            if lock_clone.lock_sync() {
+                assert!(lock_clone.release_lock());
+            } else {
+                assert!(lock_clone.is_poisoned(Relaxed));
+            }
+        });
+
+        assert!(lock.release_lock());
+
+        assert!(thread_1.join().is_ok());
+        assert!(thread_2.join().is_ok());
+        assert!(lock.is_poisoned(Relaxed));
     });
 }
 
