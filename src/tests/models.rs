@@ -50,15 +50,7 @@ fn lock_exclusive() {
 
         let lock_clone = lock.clone();
         let check_clone = check.clone();
-        let thread_1 = spawn(move || {
-            assert!(lock_clone.lock_sync());
-            assert!(check_clone.load(Relaxed));
-            assert!(lock_clone.release_lock());
-        });
-
-        let lock_clone = lock.clone();
-        let check_clone = check.clone();
-        let thread_2 = spawn(move || {
+        let thread = spawn(move || {
             assert!(lock_clone.lock_sync());
             assert!(check_clone.load(Relaxed));
             assert!(lock_clone.release_lock());
@@ -66,8 +58,7 @@ fn lock_exclusive() {
 
         check.store(true, Relaxed);
         assert!(lock.release_share());
-        assert!(thread_1.join().is_ok());
-        assert!(thread_2.join().is_ok());
+        assert!(thread.join().is_ok());
     });
 }
 

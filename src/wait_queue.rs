@@ -18,6 +18,7 @@ use loom::sync::atomic::{AtomicPtr, AtomicU16};
 use loom::thread::{Thread, current, park, yield_now};
 
 use crate::opcode::Opcode;
+use crate::sync_primitive::SyncPrimitive;
 
 /// Fair and heap-free intrusive wait queue for locking primitives in this crate.
 ///
@@ -31,6 +32,8 @@ pub(crate) struct WaitQueue {
     next_entry_ptr: AtomicPtr<Self>,
     /// Points to the entry that was pushed right after this entry.
     prev_entry_ptr: AtomicPtr<Self>,
+    /// Address of the corresponding synchronization primitive.
+    addr: usize,
     /// Operation type.
     opcode: Opcode,
     /// Operation state.
@@ -48,9 +51,7 @@ struct AsyncContext {
     /// Waker to wake an executor when the result is ready.
     waker: UnsafeCell<Option<Waker>>,
     /// Context cleaner when an asynchronous [`WaitQueue`] is cancelled.
-    cleaner: fn(&WaitQueue, usize),
-    /// Argument to pass to the cleaner function.
-    cleaner_arg: usize,
+    cleaner: fn(&WaitQueue),
 }
 
 /// Contextual data for synchronous [`WaitQueue`].
@@ -82,28 +83,31 @@ impl WaitQueue {
     /// Mask to extract the memory address part from a `usize` value.
     pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
 
+    /// Indicates that the wait queue is enqueued.
+    const ENQUEUED: u16 = 1_u16 << u8::BITS;
+
     /// Indicates that a result is set.
-    const RESULT_SET: u16 = 1_u16 << u8::BITS;
+    const RESULT_SET: u16 = 1_u16 << (u8::BITS + 1);
 
     /// Indicates that a waker is set.
-    const WAKER_SET: u16 = 1_u16 << (u8::BITS + 1);
+    const WAKER_SET: u16 = 1_u16 << (u8::BITS + 2);
 
     /// Indicates that a result is finalized.
-    const RESULT_FINALIZED: u16 = 1_u16 << (u8::BITS + 2);
+    const RESULT_FINALIZED: u16 = 1_u16 << (u8::BITS + 3);
 
     /// Indicates that a result is acknowledged.
-    const RESULT_ACKED: u16 = 1_u16 << (u8::BITS + 3);
+    const RESULT_ACKED: u16 = 1_u16 << (u8::BITS + 4);
 
     /// Creates a new [`WaitQueue`] for asynchronous method.
-    pub(crate) fn new_async(opcode: Opcode, cleaner: fn(&WaitQueue, usize), arg: usize) -> Self {
+    pub(crate) fn new_async(opcode: Opcode, cleaner: fn(&WaitQueue), addr: usize) -> Self {
         let monitor = Monitor::Async(AsyncContext {
             waker: UnsafeCell::new(None),
             cleaner,
-            cleaner_arg: arg,
         });
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
+            addr,
             opcode,
             state: AtomicU16::new(0),
             monitor,
@@ -111,13 +115,14 @@ impl WaitQueue {
     }
 
     /// Creates a new [`WaitQueue`] for synchronous method.
-    pub(crate) fn new_sync(opcode: Opcode) -> Self {
+    pub(crate) fn new_sync(opcode: Opcode, addr: usize) -> Self {
         let monitor = Monitor::Sync(SyncContext {
             thread: UnsafeCell::new(None),
         });
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
+            addr,
             opcode,
             state: AtomicU16::new(0),
             monitor,
@@ -167,6 +172,11 @@ impl WaitQueue {
     pub(crate) fn addr_to_ptr(wait_queue_addr: usize) -> *const Self {
         debug_assert_eq!(wait_queue_addr % align_of::<Self>(), 0);
         with_exposed_provenance(wait_queue_addr)
+    }
+
+    /// Returns the corresponding synchronization primitive reference.
+    pub(crate) fn sync_primitive_ref<S: SyncPrimitive>(&self) -> &S {
+        unsafe { &*with_exposed_provenance::<S>(self.addr) }
     }
 
     /// Sets a pointer to the previous entry on each entry by forward-iterating over entries.
@@ -377,10 +387,14 @@ impl WaitQueue {
         }
     }
 
-    /// Sets the result as acknowledged if pushing the entry into the wait queue failed.
-    pub(crate) fn result_acknowledged(&self) {
-        debug_assert_eq!(self.state.load(Relaxed) & Self::RESULT_ACKED, 0);
-        self.state.fetch_or(Self::RESULT_ACKED, Release);
+    /// The wait queue has been enqueued.
+    pub(crate) fn enqueued(&self) {
+        let Monitor::Async(_) = &self.monitor else {
+            // Synchronous wait queue entries do not need the flag to set.
+            return;
+        };
+        debug_assert_eq!(self.state.load(Relaxed) & Self::ENQUEUED, 0);
+        self.state.fetch_or(Self::ENQUEUED, Release);
     }
 
     /// Returns `true` if the result has been finalized.
@@ -417,8 +431,9 @@ impl Drop for WaitQueue {
         let Monitor::Async(async_context) = &self.monitor else {
             return;
         };
-        if self.state.load(Acquire) & Self::RESULT_ACKED == 0 {
-            (async_context.cleaner)(self, async_context.cleaner_arg);
+        let state = self.state.load(Acquire);
+        if state & Self::ENQUEUED == Self::ENQUEUED && state & Self::RESULT_ACKED == 0 {
+            (async_context.cleaner)(self);
         }
     }
 }

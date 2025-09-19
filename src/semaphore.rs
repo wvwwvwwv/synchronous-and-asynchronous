@@ -4,6 +4,7 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
+use std::pin::Pin;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
@@ -13,7 +14,7 @@ use loom::sync::atomic::AtomicUsize;
 
 use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
-use crate::wait_queue::WaitQueue;
+use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
 
 /// [`Semaphore`] is a synchronization primitive that allows a fixed number of threads to access a
 /// resource concurrently.
@@ -135,7 +136,10 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async(&self) {
-        self.acquire_many_async_with(1, || ()).await;
+        let async_wait =
+            WaitQueue::new_async(Opcode::Semaphore(1), Self::cleanup_wait_queue, self.addr());
+        self.acquire_async_with_internal(&async_wait, 1, || {})
+            .await;
     }
 
     /// Gets a permit from the semaphore asynchronously with a wait callback provided.
@@ -159,7 +163,10 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async_with<F: FnOnce()>(&self, begin_wait: F) {
-        self.acquire_many_async_with(1, begin_wait).await;
+        let async_wait =
+            WaitQueue::new_async(Opcode::Semaphore(1), Self::cleanup_wait_queue, self.addr());
+        self.acquire_async_with_internal(&async_wait, 1, begin_wait)
+            .await;
     }
 
     /// Gets a permit from the semaphore synchronously.
@@ -238,7 +245,14 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_many_async(&self, count: usize) {
-        self.acquire_many_async_with(count, || ()).await;
+        #[allow(clippy::cast_possible_truncation)]
+        let async_wait = WaitQueue::new_async(
+            Opcode::Semaphore(count as u8),
+            Self::cleanup_wait_queue,
+            self.addr(),
+        );
+        self.acquire_async_with_internal(&async_wait, count, || {})
+            .await;
     }
 
     /// Gets multiple permits from the semaphore asynchronously with a wait callback provided.
@@ -261,23 +275,15 @@ impl Semaphore {
     /// };
     /// ```
     #[inline]
-    pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, mut begin_wait: F) {
-        loop {
-            let (result, state) = self.try_acquire_internal(count);
-            if result {
-                return;
-            }
-            // The value is checked in `try_acquire_internal`.
-            #[allow(clippy::cast_possible_truncation)]
-            if let Err(returned) = self
-                .wait_resources_async(state, Opcode::Semaphore(count as u8), begin_wait)
-                .await
-            {
-                begin_wait = returned;
-            } else {
-                return;
-            }
-        }
+    pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) {
+        #[allow(clippy::cast_possible_truncation)]
+        let async_wait = WaitQueue::new_async(
+            Opcode::Semaphore(count as u8),
+            Self::cleanup_wait_queue,
+            self.addr(),
+        );
+        self.acquire_async_with_internal(&async_wait, count, begin_wait)
+            .await;
     }
 
     /// Gets multiple permits from the semaphore synchronously.
@@ -408,6 +414,34 @@ impl Semaphore {
         {
             Ok(_) => true,
             Err(state) => self.release_loop(state, Opcode::Semaphore(count)),
+        }
+    }
+
+    /// Acquires permits asynchronously.
+    #[inline]
+    async fn acquire_async_with_internal<F: FnOnce()>(
+        &self,
+        wait_queue: &WaitQueue,
+        count: usize,
+        mut begin_wait: F,
+    ) {
+        let pinned_async_wait = PinnedWaitQueue(Pin::new(wait_queue));
+        loop {
+            let (result, state) = self.try_acquire_internal(count);
+            if result {
+                return;
+            }
+            debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
+
+            if let Some(returned) =
+                self.try_push_wait_queue_entry(pinned_async_wait.0, state, begin_wait)
+            {
+                begin_wait = returned;
+                continue;
+            }
+
+            pinned_async_wait.await;
+            return;
         }
     }
 

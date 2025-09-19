@@ -3,6 +3,7 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
+use std::pin::Pin;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release};
@@ -13,7 +14,7 @@ use loom::sync::atomic::AtomicUsize;
 
 use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
-use crate::wait_queue::WaitQueue;
+use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
 
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 ///
@@ -144,7 +145,10 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async(&self) -> bool {
-        self.lock_async_with(|| ()).await
+        let async_wait =
+            WaitQueue::new_async(Opcode::Exclusive, Self::cleanup_wait_queue, self.addr());
+        self.acquire_async_with_internal::<_, true>(&async_wait, || {})
+            .await
     }
 
     /// Acquires an exclusive lock asynchronously with a wait callback provided.
@@ -167,27 +171,11 @@ impl Lock {
     /// };
     /// ```
     #[inline]
-    pub async fn lock_async_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
-        loop {
-            let (result, state) = self.try_lock_internal();
-            if result == Self::ACQUIRED {
-                return true;
-            } else if result == Self::POISONED {
-                return false;
-            }
-            debug_assert_eq!(result, Self::NOT_ACQUIRED);
-
-            match self
-                .wait_resources_async(state, Opcode::Exclusive, begin_wait)
-                .await
-            {
-                Ok(result) => {
-                    debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
-                    return result == Self::ACQUIRED;
-                }
-                Err(returned) => begin_wait = returned,
-            }
-        }
+    pub async fn lock_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
+        let async_wait =
+            WaitQueue::new_async(Opcode::Exclusive, Self::cleanup_wait_queue, self.addr());
+        self.acquire_async_with_internal::<_, true>(&async_wait, begin_wait)
+            .await
     }
 
     /// Acquires an exclusive lock synchronously.
@@ -291,7 +279,10 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async(&self) -> bool {
-        self.share_async_with(|| ()).await
+        let async_wait =
+            WaitQueue::new_async(Opcode::Shared, Self::cleanup_wait_queue, self.addr());
+        self.acquire_async_with_internal::<_, false>(&async_wait, || ())
+            .await
     }
 
     /// Acquires a shared lock asynchronously with a wait callback provided.
@@ -314,27 +305,11 @@ impl Lock {
     /// };
     /// ```
     #[inline]
-    pub async fn share_async_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
-        loop {
-            let (result, state) = self.try_share_internal();
-            if result == Self::ACQUIRED {
-                return true;
-            } else if result == Self::POISONED {
-                return false;
-            }
-            debug_assert_eq!(result, Self::NOT_ACQUIRED);
-
-            match self
-                .wait_resources_async(state, Opcode::Shared, begin_wait)
-                .await
-            {
-                Ok(result) => {
-                    debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
-                    return result == Self::ACQUIRED;
-                }
-                Err(returned) => begin_wait = returned,
-            }
-        }
+    pub async fn share_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
+        let async_wait =
+            WaitQueue::new_async(Opcode::Shared, Self::cleanup_wait_queue, self.addr());
+        self.acquire_async_with_internal::<_, false>(&async_wait, begin_wait)
+            .await
     }
 
     /// Acquires a shared lock synchronously.
@@ -590,6 +565,41 @@ impl Lock {
                     Err(new_state) => state = new_state,
                 }
             }
+        }
+    }
+
+    /// Acquires an exclusive lock or a shared lock asynchronously.
+    #[inline]
+    async fn acquire_async_with_internal<F: FnOnce(), const EXCLUSIVE: bool>(
+        &self,
+        wait_queue: &WaitQueue,
+        mut begin_wait: F,
+    ) -> bool {
+        let pinned_async_wait = PinnedWaitQueue(Pin::new(wait_queue));
+        loop {
+            let (mut result, state) = if EXCLUSIVE {
+                self.try_lock_internal()
+            } else {
+                self.try_share_internal()
+            };
+            if result == Self::ACQUIRED {
+                return true;
+            } else if result == Self::POISONED {
+                return false;
+            }
+            debug_assert_eq!(result, Self::NOT_ACQUIRED);
+            debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
+
+            if let Some(returned) =
+                self.try_push_wait_queue_entry(pinned_async_wait.0, state, begin_wait)
+            {
+                begin_wait = returned;
+                continue;
+            }
+
+            result = pinned_async_wait.await;
+            debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
+            return result == Self::ACQUIRED;
         }
     }
 

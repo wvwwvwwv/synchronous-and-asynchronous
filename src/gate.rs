@@ -3,6 +3,7 @@
 
 #![deny(unsafe_code)]
 
+use std::marker::PhantomData;
 use std::pin::Pin;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
@@ -28,7 +29,9 @@ pub struct Gate {
 #[derive(Debug, Default)]
 pub struct Pager<'g> {
     /// The [`Gate`] that the [`Pager`] is registered in and the wait queue entry for the [`Pager`].
-    entry: Option<(&'g Gate, WaitQueue)>,
+    entry: Option<WaitQueue>,
+    /// The [`Pager`] cannot outlive the [`Gate`] it is registered in.
+    _phantom: PhantomData<&'g Gate>,
 }
 
 /// The state of a [`Gate`].
@@ -297,7 +300,13 @@ impl Gate {
     /// ```
     #[inline]
     pub async fn enter_async(&self) -> Result<State, Error> {
-        self.enter_async_with(|| ()).await
+        let mut pager = Pager::default();
+        pager
+            .entry
+            .replace(WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()));
+        let mut pinned_pager = Pin::new(&mut pager);
+        self.push_wait_queue_entry(&mut pinned_pager, || {});
+        pinned_pager.await
     }
 
     /// Enters the [`Gate`] asynchronously with a wait callback provided.
@@ -328,10 +337,9 @@ impl Gate {
     #[inline]
     pub async fn enter_async_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
         let mut pager = Pager::default();
-        pager.entry.replace((
-            self,
-            WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()),
-        ));
+        pager
+            .entry
+            .replace(WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()));
         let mut pinned_pager = Pin::new(&mut pager);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.await
@@ -427,7 +435,7 @@ impl Gate {
         let mut pager = Pager::default();
         pager
             .entry
-            .replace((self, WaitQueue::new_sync(Opcode::Wait)));
+            .replace(WaitQueue::new_sync(Opcode::Wait, self.addr()));
         let mut pinned_pager = Pin::new(&mut pager);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_sync()
@@ -465,10 +473,9 @@ impl Gate {
         if pager.entry.is_some() {
             return false;
         }
-        pager.entry.replace((
-            self,
-            WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()),
-        ));
+        pager
+            .entry
+            .replace(WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()));
         self.push_wait_queue_entry(pager, || ());
         true
     }
@@ -511,7 +518,7 @@ impl Gate {
         }
         pager
             .entry
-            .replace((self, WaitQueue::new_sync(Opcode::Wait)));
+            .replace(WaitQueue::new_sync(Opcode::Wait, self.addr()));
         self.push_wait_queue_entry(pager, || ());
         true
     }
@@ -557,7 +564,7 @@ impl Gate {
         entry: &mut Pin<&mut Pager>,
         mut wait_callback: F,
     ) {
-        if let Some((_, entry)) = entry.entry.as_ref() {
+        if let Some(entry) = entry.entry.as_ref() {
             let pinned_entry = Pin::new(entry);
             loop {
                 let state = self.state.load(Acquire);
@@ -584,7 +591,7 @@ impl Gate {
 
     /// Noop function.
     #[inline]
-    fn noop(_entry: &WaitQueue, _this_addr: usize) {
+    fn noop(_entry: &WaitQueue) {
         unreachable!("Noop function called");
     }
 
@@ -683,9 +690,7 @@ impl<'g> Pager<'g> {
     /// ```
     #[inline]
     pub fn is_sync(&self) -> bool {
-        self.entry
-            .as_ref()
-            .is_some_and(|(_, entry)| entry.is_sync())
+        self.entry.as_ref().is_some_and(WaitQueue::is_sync)
     }
 
     /// Waits for a permit to enter the [`Gate`].
@@ -715,7 +720,7 @@ impl<'g> Pager<'g> {
     /// ```
     #[inline]
     pub fn poll_sync(self: &mut Pin<&mut Pager<'g>>) -> Result<State, Error> {
-        let Some((_, entry)) = self.entry.as_ref() else {
+        let Some(entry) = self.entry.as_ref() else {
             // The `Pager` is not registered in any `Gate`.
             return Err(Error::NotRegistered);
         };
@@ -757,7 +762,7 @@ impl<'g> Pager<'g> {
     /// ```
     #[inline]
     pub fn try_poll(&self) -> Result<State, Error> {
-        let Some((_, entry)) = self.entry.as_ref() else {
+        let Some(entry) = self.entry.as_ref() else {
             // The `Pager` is not registered in any `Gate`.
             return Err(Error::NotRegistered);
         };
@@ -774,10 +779,11 @@ impl<'g> Pager<'g> {
 impl Drop for Pager<'_> {
     #[inline]
     fn drop(&mut self) {
-        let Some((gate, entry)) = self.entry.as_mut() else {
+        let Some(entry) = self.entry.as_mut() else {
             return;
         };
         if entry.try_acknowledge_result().is_none() {
+            let gate: &Gate = entry.sync_primitive_ref();
             gate.wake_all(None, Some(Error::SpuriousFailure));
             entry.acknowledge_result_sync();
         }
@@ -789,7 +795,7 @@ impl Future for Pager<'_> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some((_, entry)) = self.entry.as_ref() else {
+        let Some(entry) = self.entry.as_ref() else {
             // The `Pager` is not registered in any `Gate`.
             return Poll::Ready(Err(Error::NotRegistered));
         };

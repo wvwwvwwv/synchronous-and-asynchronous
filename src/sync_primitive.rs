@@ -1,7 +1,7 @@
 //! Define base operations for synchronization primitives.
 
 use std::pin::Pin;
-use std::ptr::{addr_of, null, with_exposed_provenance};
+use std::ptr::{addr_of, null};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
@@ -11,7 +11,7 @@ use std::thread;
 use loom::sync::atomic::AtomicUsize;
 
 use crate::opcode::Opcode;
-use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
+use crate::wait_queue::WaitQueue;
 
 /// Define base operations for synchronization primitives.
 pub(crate) trait SyncPrimitive: Sized {
@@ -45,37 +45,13 @@ pub(crate) trait SyncPrimitive: Sized {
             .compare_exchange(state, next_state, AcqRel, Acquire)
             .is_ok()
         {
+            // The entry cannot be dropped until the result is acknowledged.
+            entry.enqueued();
             begin_wait();
             None
         } else {
             Some(begin_wait)
         }
-    }
-
-    /// Waits for the desired resources asynchronously.
-    async fn wait_resources_async<F: FnOnce()>(
-        &self,
-        state: usize,
-        mode: Opcode,
-        begin_wait: F,
-    ) -> Result<u8, F> {
-        debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-
-        let async_wait = WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.addr());
-        let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
-        debug_assert_eq!(
-            addr_of!(async_wait),
-            WaitQueue::ref_to_ptr(&pinned_async_wait.0)
-        );
-
-        if let Some(returned) =
-            self.try_push_wait_queue_entry(pinned_async_wait.0, state, begin_wait)
-        {
-            pinned_async_wait.0.set_result(0);
-            pinned_async_wait.0.result_acknowledged();
-            return Err(returned);
-        }
-        Ok(pinned_async_wait.await)
     }
 
     /// Waits for the desired resources synchronously.
@@ -87,7 +63,7 @@ pub(crate) trait SyncPrimitive: Sized {
     ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
-        let sync_wait = WaitQueue::new_sync(mode);
+        let sync_wait = WaitQueue::new_sync(mode, self.addr());
         let pinned_sync_wait = Pin::new(&sync_wait);
         debug_assert_eq!(
             addr_of!(sync_wait),
@@ -284,8 +260,8 @@ pub(crate) trait SyncPrimitive: Sized {
 
     /// Cleans up a [`WaitQueue`] entry that was pushed into the wait queue, but has not been
     /// processed.
-    fn cleanup_wait_queue_entry(entry: &WaitQueue, this_addr: usize) {
-        let this: &Self = unsafe { &*with_exposed_provenance(this_addr) };
+    fn cleanup_wait_queue(entry: &WaitQueue) {
+        let this: &Self = entry.sync_primitive_ref();
         let wait_queue_ptr: *const WaitQueue = addr_of!(*entry);
         let wait_queue_addr = wait_queue_ptr.expose_provenance();
 
@@ -335,19 +311,15 @@ pub(crate) trait SyncPrimitive: Sized {
     #[cfg(test)]
     fn test_drop_wait_queue_entry(&self, mode: Opcode) {
         let state = self.state().load(Acquire);
-        let async_wait = WaitQueue::new_async(mode, Self::cleanup_wait_queue_entry, self.addr());
-        let pinned_async_wait = PinnedWaitQueue(Pin::new(&async_wait));
+        let async_wait = WaitQueue::new_async(mode, Self::cleanup_wait_queue, self.addr());
+        let pinned_async_wait = crate::wait_queue::PinnedWaitQueue(Pin::new(&async_wait));
         debug_assert_eq!(
             addr_of!(async_wait),
             WaitQueue::ref_to_ptr(&pinned_async_wait.0)
         );
 
-        if self
-            .try_push_wait_queue_entry(pinned_async_wait.0, state, || ())
-            .is_some()
-        {
-            pinned_async_wait.0.set_result(0);
-            pinned_async_wait.0.result_acknowledged();
+        if let Some(f) = self.try_push_wait_queue_entry(pinned_async_wait.0, state, || ()) {
+            f();
         }
     }
 }

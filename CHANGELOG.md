@@ -1,5 +1,9 @@
 # Changelog
 
+3.3.0
+
+* Reduce the size of asynchronous tasks in general.
+
 3.2.1
 
 * Minor optimization.

@@ -24,7 +24,6 @@ loom = ["dep:loom"]
 [dev-dependencies]
 criterion = "0.7"
 futures = "0.3"
-static_assertions = "1.1"
 tokio = { version = "1.47", features = ["full"] }
 
 [[bench]]

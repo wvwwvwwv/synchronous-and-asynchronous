@@ -10,14 +10,33 @@ use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::WaitQueue;
 use crate::{Gate, Lock, Semaphore, gate};
 
-static_assertions::assert_eq_size!(WaitQueue, [u64; 16]);
-
-#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
-#[tokio::test]
-async fn future_size() {
+#[test]
+fn future_size() {
     let lock = Lock::default();
     let lock_size = size_of_val(&lock.lock_async());
-    assert!(lock_size < 1, "{lock_size}");
+    assert_eq!(lock_size, size_of::<WaitQueue>() * 2);
+    let lock_with_size = size_of_val(&lock.lock_async_with(|| {}));
+    assert_eq!(lock_with_size, size_of::<WaitQueue>() * 2);
+    let share_size = size_of_val(&lock.share_async());
+    assert_eq!(share_size, size_of::<WaitQueue>() * 2);
+    let share_with_size = size_of_val(&lock.share_async_with(|| {}));
+    assert_eq!(share_with_size, size_of::<WaitQueue>() * 2);
+
+    let semaphore = Semaphore::default();
+    let acquire_size = size_of_val(&semaphore.acquire_async());
+    assert_eq!(acquire_size, size_of::<WaitQueue>() * 2);
+    let acquire_with_size = size_of_val(&semaphore.acquire_async_with(|| {}));
+    assert_eq!(acquire_with_size, size_of::<WaitQueue>() * 2);
+    let acquire_many_size = size_of_val(&semaphore.acquire_many_async(1));
+    assert_eq!(acquire_many_size, size_of::<WaitQueue>() * 2);
+    let acquire_many_with_size = size_of_val(&semaphore.acquire_many_async_with(1, || {}));
+    assert_eq!(acquire_many_with_size, size_of::<WaitQueue>() * 2);
+
+    let gate = Gate::default();
+    let enter_size = size_of_val(&gate.enter_async());
+    assert_eq!(enter_size, size_of::<WaitQueue>() * 2);
+    let enter_with_size = size_of_val(&gate.enter_async_with(|| {}));
+    assert_eq!(enter_with_size, size_of::<WaitQueue>() * 2);
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
