@@ -7,7 +7,18 @@ use std::time::Duration;
 
 use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
+use crate::wait_queue::WaitQueue;
 use crate::{Gate, Lock, Semaphore, gate};
+
+static_assertions::assert_eq_size!(WaitQueue, [u64; 16]);
+
+#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
+#[tokio::test]
+async fn future_size() {
+    let lock = Lock::default();
+    let lock_size = size_of_val(&lock.lock_async());
+    assert!(lock_size < 1, "{lock_size}");
+}
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
