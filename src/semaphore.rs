@@ -136,8 +136,7 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async(&self) {
-        let async_wait =
-            WaitQueue::new_async(Opcode::Semaphore(1), Self::cleanup_wait_queue, self.addr());
+        let async_wait = WaitQueue::new(self, Opcode::Semaphore(1), false);
         self.acquire_async_with_internal(&async_wait, 1, || {})
             .await;
     }
@@ -163,8 +162,7 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async_with<F: FnOnce()>(&self, begin_wait: F) {
-        let async_wait =
-            WaitQueue::new_async(Opcode::Semaphore(1), Self::cleanup_wait_queue, self.addr());
+        let async_wait = WaitQueue::new(self, Opcode::Semaphore(1), false);
         self.acquire_async_with_internal(&async_wait, 1, begin_wait)
             .await;
     }
@@ -246,11 +244,7 @@ impl Semaphore {
     #[inline]
     pub async fn acquire_many_async(&self, count: usize) {
         #[allow(clippy::cast_possible_truncation)]
-        let async_wait = WaitQueue::new_async(
-            Opcode::Semaphore(count as u8),
-            Self::cleanup_wait_queue,
-            self.addr(),
-        );
+        let async_wait = WaitQueue::new(self, Opcode::Semaphore(count as u8), false);
         self.acquire_async_with_internal(&async_wait, count, || {})
             .await;
     }
@@ -277,11 +271,7 @@ impl Semaphore {
     #[inline]
     pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) {
         #[allow(clippy::cast_possible_truncation)]
-        let async_wait = WaitQueue::new_async(
-            Opcode::Semaphore(count as u8),
-            Self::cleanup_wait_queue,
-            self.addr(),
-        );
+        let async_wait = WaitQueue::new(self, Opcode::Semaphore(count as u8), false);
         self.acquire_async_with_internal(&async_wait, count, begin_wait)
             .await;
     }

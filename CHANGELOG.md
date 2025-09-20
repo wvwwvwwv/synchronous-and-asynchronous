@@ -1,5 +1,9 @@
 # Changelog
 
+3.4.0
+
+* Remove the 128B alignment constraint from the wait queue entry.
+
 3.3.0
 
 * Reduce the size of asynchronous tasks in general.

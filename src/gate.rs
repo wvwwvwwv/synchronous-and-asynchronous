@@ -303,7 +303,7 @@ impl Gate {
         let mut pager = Pager::default();
         pager
             .entry
-            .replace(WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()));
+            .replace(WaitQueue::new(self, Opcode::Wait, false));
         let mut pinned_pager = Pin::new(&mut pager);
         self.push_wait_queue_entry(&mut pinned_pager, || {});
         pinned_pager.await
@@ -339,7 +339,7 @@ impl Gate {
         let mut pager = Pager::default();
         pager
             .entry
-            .replace(WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()));
+            .replace(WaitQueue::new(self, Opcode::Wait, false));
         let mut pinned_pager = Pin::new(&mut pager);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.await
@@ -435,7 +435,7 @@ impl Gate {
         let mut pager = Pager::default();
         pager
             .entry
-            .replace(WaitQueue::new_sync(Opcode::Wait, self.addr()));
+            .replace(WaitQueue::new(self, Opcode::Wait, true));
         let mut pinned_pager = Pin::new(&mut pager);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_sync()
@@ -475,7 +475,7 @@ impl Gate {
         }
         pager
             .entry
-            .replace(WaitQueue::new_async(Opcode::Wait, Self::noop, self.addr()));
+            .replace(WaitQueue::new(self, Opcode::Wait, false));
         self.push_wait_queue_entry(pager, || ());
         true
     }
@@ -518,7 +518,7 @@ impl Gate {
         }
         pager
             .entry
-            .replace(WaitQueue::new_sync(Opcode::Wait, self.addr()));
+            .replace(WaitQueue::new(self, Opcode::Wait, true));
         self.push_wait_queue_entry(pager, || ());
         true
     }
@@ -587,12 +587,6 @@ impl Gate {
                 break;
             }
         }
-    }
-
-    /// Noop function.
-    #[inline]
-    fn noop(_entry: &WaitQueue) {
-        unreachable!("Noop function called");
     }
 
     /// Converts `(State, Error)` into `u8`.

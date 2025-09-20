@@ -63,7 +63,7 @@ pub(crate) trait SyncPrimitive: Sized {
     ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
-        let sync_wait = WaitQueue::new_sync(mode, self.addr());
+        let sync_wait = WaitQueue::new(self, mode, true);
         let pinned_sync_wait = Pin::new(&sync_wait);
         debug_assert_eq!(
             addr_of!(sync_wait),
@@ -311,7 +311,7 @@ pub(crate) trait SyncPrimitive: Sized {
     #[cfg(test)]
     fn test_drop_wait_queue_entry(&self, mode: Opcode) {
         let state = self.state().load(Acquire);
-        let async_wait = WaitQueue::new_async(mode, Self::cleanup_wait_queue, self.addr());
+        let async_wait = WaitQueue::new(self, mode, false);
         let pinned_async_wait = crate::wait_queue::PinnedWaitQueue(Pin::new(&async_wait));
         debug_assert_eq!(
             addr_of!(async_wait),

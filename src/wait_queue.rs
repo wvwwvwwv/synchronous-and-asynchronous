@@ -99,30 +99,21 @@ impl WaitQueue {
     const RESULT_ACKED: u16 = 1_u16 << (u8::BITS + 4);
 
     /// Creates a new [`WaitQueue`] for asynchronous method.
-    pub(crate) fn new_async(opcode: Opcode, cleaner: fn(&WaitQueue), addr: usize) -> Self {
-        let monitor = Monitor::Async(AsyncContext {
-            waker: UnsafeCell::new(None),
-            cleaner,
-        });
+    pub(crate) fn new<S: SyncPrimitive>(this: &S, opcode: Opcode, is_sync: bool) -> Self {
+        let monitor = if is_sync {
+            Monitor::Sync(SyncContext {
+                thread: UnsafeCell::new(None),
+            })
+        } else {
+            Monitor::Async(AsyncContext {
+                waker: UnsafeCell::new(None),
+                cleaner: S::cleanup_wait_queue,
+            })
+        };
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
-            addr,
-            opcode,
-            state: AtomicU16::new(0),
-            monitor,
-        }
-    }
-
-    /// Creates a new [`WaitQueue`] for synchronous method.
-    pub(crate) fn new_sync(opcode: Opcode, addr: usize) -> Self {
-        let monitor = Monitor::Sync(SyncContext {
-            thread: UnsafeCell::new(None),
-        });
-        Self {
-            next_entry_ptr: AtomicPtr::new(null_mut()),
-            prev_entry_ptr: AtomicPtr::new(null_mut()),
-            addr,
+            addr: this.addr(),
             opcode,
             state: AtomicU16::new(0),
             monitor,

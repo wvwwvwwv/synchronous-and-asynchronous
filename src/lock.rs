@@ -145,8 +145,7 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async(&self) -> bool {
-        let async_wait =
-            WaitQueue::new_async(Opcode::Exclusive, Self::cleanup_wait_queue, self.addr());
+        let async_wait = WaitQueue::new(self, Opcode::Exclusive, false);
         self.acquire_async_with_internal::<_, true>(&async_wait, || {})
             .await
     }
@@ -172,8 +171,7 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
-        let async_wait =
-            WaitQueue::new_async(Opcode::Exclusive, Self::cleanup_wait_queue, self.addr());
+        let async_wait = WaitQueue::new(self, Opcode::Exclusive, false);
         self.acquire_async_with_internal::<_, true>(&async_wait, begin_wait)
             .await
     }
@@ -279,8 +277,7 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async(&self) -> bool {
-        let async_wait =
-            WaitQueue::new_async(Opcode::Shared, Self::cleanup_wait_queue, self.addr());
+        let async_wait = WaitQueue::new(self, Opcode::Shared, false);
         self.acquire_async_with_internal::<_, false>(&async_wait, || ())
             .await
     }
@@ -306,8 +303,7 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
-        let async_wait =
-            WaitQueue::new_async(Opcode::Shared, Self::cleanup_wait_queue, self.addr());
+        let async_wait = WaitQueue::new(self, Opcode::Shared, false);
         self.acquire_async_with_internal::<_, false>(&async_wait, begin_wait)
             .await
     }
