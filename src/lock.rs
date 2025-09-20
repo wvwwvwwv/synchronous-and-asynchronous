@@ -12,6 +12,7 @@ use std::thread::yield_now;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
 
+use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
@@ -26,6 +27,15 @@ use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
 pub struct Lock {
     /// [`Lock`] state.
     state: AtomicUsize,
+}
+
+/// Locking mode, either exclusive or shared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Mode {
+    /// Exclusive lock.
+    Exclusive,
+    /// Shared lock.
+    Shared,
 }
 
 impl Lock {
@@ -389,6 +399,70 @@ impl Lock {
     #[inline]
     pub fn try_share(&self) -> bool {
         self.try_share_internal().0 == Self::ACQUIRED
+    }
+
+    /// Registers a [`Pager`] to allow it get an exclusive lock or a shared lock remotely.
+    ///
+    /// `is_sync` indicates whether the [`Pager`] will be asynchronously (false), or synchronously
+    /// (true) polled.
+    ///
+    /// Returns `false` if the [`Pager`] was already registered.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::pin::Pin;
+    ///
+    /// use saa::{Lock, Pager};
+    /// use saa::lock::Mode;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// let mut pager = Pager::default();
+    /// let mut pinned_pager = Pin::new(&mut pager);
+    ///
+    /// assert!(lock.register_pager(&mut pinned_pager, Mode::Exclusive, true));
+    /// assert!(!lock.register_pager(&mut pinned_pager, Mode::Exclusive, true));
+    ///
+    /// assert_eq!(pinned_pager.poll_sync(), Ok(true));
+    /// ```
+    #[inline]
+    pub fn register_pager<'l>(
+        &'l self,
+        pager: &mut Pin<&mut Pager<'l, Self>>,
+        mode: Mode,
+        is_sync: bool,
+    ) -> bool {
+        if pager.entry().is_some() {
+            return false;
+        }
+        let opcode = match mode {
+            Mode::Exclusive => Opcode::Exclusive,
+            Mode::Shared => Opcode::Shared,
+        };
+        pager.set_entry(WaitQueue::new(self, opcode, is_sync));
+        loop {
+            let Some(entry) = pager.entry() else {
+                continue;
+            };
+            let (result, state) = match mode {
+                Mode::Exclusive => self.try_lock_internal(),
+                Mode::Shared => self.try_share_internal(),
+            };
+            if result == Self::ACQUIRED || result == Self::POISONED {
+                entry.set_result(result);
+                break;
+            }
+
+            let pinned_entry = Pin::new(entry);
+            if self
+                .try_push_wait_queue_entry(pinned_entry, state, || ())
+                .is_none()
+            {
+                break;
+            }
+        }
+        true
     }
 
     /// Releases an exclusive lock.

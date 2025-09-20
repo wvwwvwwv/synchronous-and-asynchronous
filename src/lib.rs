@@ -4,13 +4,13 @@
 pub mod gate;
 pub use gate::Gate;
 
-mod lock;
+pub mod lock;
 pub use lock::Lock;
 
-mod pager;
+pub mod pager;
 pub use pager::Pager;
 
-mod semaphore;
+pub mod semaphore;
 pub use semaphore::Semaphore;
 
 mod opcode;

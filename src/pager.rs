@@ -55,7 +55,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// let mut pinned_pager = Pin::new(&mut pager);
     /// assert!(!pinned_pager.is_registered());
     ///
-    /// assert!(gate.register_sync(&mut pinned_pager));
+    /// assert!(gate.register_pager(&mut pinned_pager, false));
     /// assert!(pinned_pager.is_registered());
     ///
     /// assert_eq!(gate.open().1, 1);
@@ -80,7 +80,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// let mut pager = Pager::default();
     /// let mut pinned_pager = Pin::new(&mut pager);
     ///
-    /// assert!(gate.register_sync(&mut pinned_pager));
+    /// assert!(gate.register_pager(&mut pinned_pager, true));
     /// assert!(pinned_pager.is_sync());
     ///
     /// assert_eq!(gate.open().1, 1);
@@ -108,7 +108,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// let mut pager = Pager::default();
     /// let mut pinned_pager = Pin::new(&mut pager);
     ///
-    /// assert!(gate.register_sync(&mut pinned_pager));
+    /// assert!(gate.register_pager(&mut pinned_pager, true));
     ///
     /// assert_eq!(gate.open().1, 1);
     ///
@@ -142,7 +142,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// let mut pager = Pager::default();
     /// let mut pinned_pager = Pin::new(&mut pager);
     ///
-    /// assert!(gate.register_sync(&mut pinned_pager));
+    /// assert!(gate.register_pager(&mut pinned_pager, true));
     ///
     /// assert_eq!(pinned_pager.try_poll(), Err(Error::NotReady));
     /// assert_eq!(gate.open().1, 1);

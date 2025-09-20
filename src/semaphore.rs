@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
 
+use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
@@ -315,6 +316,7 @@ impl Semaphore {
     #[inline]
     pub fn acquire_many_sync_with<F: FnOnce()>(&self, count: usize, mut begin_wait: F) {
         loop {
+            // TODO: return false if count > max;
             let (result, state) = self.try_acquire_internal(count);
             if result {
                 return;
@@ -348,6 +350,66 @@ impl Semaphore {
     #[inline]
     pub fn try_acquire_many(&self, count: usize) -> bool {
         self.try_acquire_internal(count).0
+    }
+
+    /// Registers a [`Pager`] to allow it get a permit remotely.
+    ///
+    /// `is_sync` indicates whether the [`Pager`] will be asynchronously (false), or synchronously
+    /// (true) polled.
+    ///
+    /// Returns `false` if the [`Pager`] was already registered, or if the count is greater than the
+    /// maximum permits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::pin::Pin;
+    ///
+    /// use saa::{Pager, Semaphore};
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// let mut pager = Pager::default();
+    /// let mut pinned_pager = Pin::new(&mut pager);
+    ///
+    /// assert!(semaphore.register_pager(&mut pinned_pager, 1, true));
+    /// assert!(!semaphore.register_pager(&mut pinned_pager, 1, true));
+    ///
+    /// assert!(pinned_pager.poll_sync().is_ok());
+    /// ```
+    #[inline]
+    pub fn register_pager<'s>(
+        &'s self,
+        pager: &mut Pin<&mut Pager<'s, Self>>,
+        count: usize,
+        is_sync: bool,
+    ) -> bool {
+        if pager.entry().is_some() || count > Self::MAX_PERMITS {
+            return false;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let u8_count = count as u8;
+        pager.set_entry(WaitQueue::new(self, Opcode::Semaphore(u8_count), is_sync));
+        loop {
+            let Some(entry) = pager.entry() else {
+                continue;
+            };
+            let (result, state) = self.try_acquire_internal(count);
+            if result {
+                entry.set_result(0);
+                break;
+            }
+
+            let pinned_entry = Pin::new(entry);
+            if self
+                .try_push_wait_queue_entry(pinned_entry, state, || ())
+                .is_none()
+            {
+                break;
+            }
+        }
+        true
     }
 
     /// Releases a permit.

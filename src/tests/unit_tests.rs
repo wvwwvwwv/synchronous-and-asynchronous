@@ -849,7 +849,7 @@ async fn gate_pager() {
                 let mut pager = Pager::default();
                 for _ in 0..num_iters {
                     let mut pinned_pager = Pin::new(&mut pager);
-                    gate.register_async(&mut pinned_pager);
+                    gate.register_pager(&mut pinned_pager, false);
                     match pinned_pager.await {
                         Ok(_) => {
                             check.fetch_add(1, Relaxed);
@@ -863,7 +863,7 @@ async fn gate_pager() {
                 let mut pager = Pager::default();
                 for _ in 0..num_iters {
                     let mut pinned_pager = Pin::new(&mut pager);
-                    gate.register_sync(&mut pinned_pager);
+                    gate.register_pager(&mut pinned_pager, true);
                     match pinned_pager.poll_sync() {
                         Ok(_) => {
                             check.fetch_add(1, Relaxed);
@@ -924,9 +924,9 @@ async fn gate_chaos() {
                         let mut pager = Pager::default();
                         let mut pinned_pager = Pin::new(&mut pager);
                         if i % 3 == 0 {
-                            assert!(gate.register_async(&mut pinned_pager));
+                            assert!(gate.register_pager(&mut pinned_pager, false));
                         } else {
-                            assert!(gate.register_sync(&mut pinned_pager));
+                            assert!(gate.register_pager(&mut pinned_pager, true));
                             if let Ok(state) = pinned_pager.try_poll() {
                                 assert_eq!(pinned_pager.poll_sync(), Ok(state));
                             }

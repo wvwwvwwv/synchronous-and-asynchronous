@@ -426,44 +426,10 @@ impl Gate {
         pinned_pager.poll_sync()
     }
 
-    /// Registers a [`Pager`] to allow it to get a permit to enter the [`Gate`] remotely.
-    ///
-    /// Returns `false` if the [`Pager`] was already registered.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::pin::Pin;
-    ///
-    /// use saa::{Gate, Pager};
-    /// use saa::gate::{Error, State};
-    ///
-    /// let gate = Gate::default();
-    ///
-    /// let mut pager = Pager::default();
-    /// let mut pinned_pager = Pin::new(&mut pager);
-    ///
-    /// assert!(gate.register_async(&mut pinned_pager));
-    ///
-    /// assert_eq!(gate.open().1, 1);
-    ///
-    /// assert_eq!(pinned_pager.poll_sync(), Err(Error::WrongMode));
-    ///
-    /// async {
-    ///     assert_eq!(pinned_pager.await, Ok(State::Open));
-    /// };
-    /// ```
-    #[inline]
-    pub fn register_async<'g>(&'g self, pager: &mut Pin<&mut Pager<'g, Self>>) -> bool {
-        if pager.entry().is_some() {
-            return false;
-        }
-        pager.set_entry(WaitQueue::new(self, Opcode::Wait, false));
-        self.push_wait_queue_entry(pager, || ());
-        true
-    }
-
     /// Registers a [`Pager`] to allow it get a permit to enter the [`Gate`] remotely.
+    ///
+    /// `is_sync` indicates whether the [`Pager`] will be asynchronously (false), or synchronously
+    /// (true) polled.
     ///
     /// Returns `false` if the [`Pager`] was already registered.
     ///
@@ -482,8 +448,8 @@ impl Gate {
     /// let mut pager = Pager::default();
     /// let mut pinned_pager = Pin::new(&mut pager);
     ///
-    /// assert!(gate.register_sync(&mut pinned_pager));
-    /// assert!(!gate.register_sync(&mut pinned_pager));
+    /// assert!(gate.register_pager(&mut pinned_pager, true));
+    /// assert!(!gate.register_pager(&mut pinned_pager, true));
     ///
     /// let gate_clone = gate.clone();
     /// let thread = thread::spawn(move || {
@@ -495,11 +461,15 @@ impl Gate {
     /// assert_eq!(pinned_pager.poll_sync(), Ok(State::Controlled));
     /// ```
     #[inline]
-    pub fn register_sync<'g>(&'g self, pager: &mut Pin<&mut Pager<'g, Self>>) -> bool {
+    pub fn register_pager<'g>(
+        &'g self,
+        pager: &mut Pin<&mut Pager<'g, Self>>,
+        is_sync: bool,
+    ) -> bool {
         if pager.entry().is_some() {
             return false;
         }
-        pager.set_entry(WaitQueue::new(self, Opcode::Wait, true));
+        pager.set_entry(WaitQueue::new(self, Opcode::Wait, is_sync));
         self.push_wait_queue_entry(pager, || ());
         true
     }
