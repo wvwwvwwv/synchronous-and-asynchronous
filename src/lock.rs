@@ -13,6 +13,7 @@ use std::thread::yield_now;
 use loom::sync::atomic::AtomicUsize;
 
 use crate::opcode::Opcode;
+use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
 
@@ -703,5 +704,25 @@ impl SyncPrimitive for Lock {
     #[inline]
     fn max_shared_owners() -> usize {
         Self::MAX_SHARED_OWNERS
+    }
+
+    #[inline]
+    fn drop_wait_queue_entry(entry: &WaitQueue) {
+        Self::force_remove_wait_queue_entry(entry);
+    }
+}
+
+impl SyncResult for Lock {
+    type Result = Result<bool, pager::Error>;
+
+    #[inline]
+    fn to_result(value: u8, pager_error: Option<pager::Error>) -> Self::Result {
+        pager_error.map_or_else(
+            || {
+                debug_assert!(value == Self::ACQUIRED || value == Self::POISONED);
+                Ok(value == Self::ACQUIRED)
+            },
+            Err,
+        )
     }
 }

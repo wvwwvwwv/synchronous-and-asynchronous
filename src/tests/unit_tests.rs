@@ -8,35 +8,58 @@ use std::time::Duration;
 use crate::opcode::Opcode;
 use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::WaitQueue;
-use crate::{Gate, Lock, Semaphore, gate};
+use crate::{Gate, Lock, Pager, Semaphore, gate};
 
 #[test]
 fn future_size() {
     let lock = Lock::default();
-    let lock_size = size_of_val(&lock.lock_async());
-    assert_eq!(lock_size, size_of::<WaitQueue>() * 2);
-    let lock_with_size = size_of_val(&lock.lock_async_with(|| {}));
-    assert_eq!(lock_with_size, size_of::<WaitQueue>() * 2);
-    let share_size = size_of_val(&lock.share_async());
-    assert_eq!(share_size, size_of::<WaitQueue>() * 2);
-    let share_with_size = size_of_val(&lock.share_async_with(|| {}));
-    assert_eq!(share_with_size, size_of::<WaitQueue>() * 2);
+
+    let lock_fut = &lock.lock_async();
+    assert_eq!(size_of_val(lock_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(lock_fut), align_of::<WaitQueue>());
+
+    let lock_with_fut = &lock.lock_async_with(|| {});
+    assert_eq!(size_of_val(lock_with_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(lock_with_fut), align_of::<WaitQueue>());
+
+    let share_fut = &lock.share_async();
+    assert_eq!(size_of_val(share_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(share_fut), align_of::<WaitQueue>());
+
+    let share_with_fut = &lock.share_async_with(|| {});
+    assert_eq!(size_of_val(share_with_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(share_with_fut), align_of::<WaitQueue>());
 
     let semaphore = Semaphore::default();
-    let acquire_size = size_of_val(&semaphore.acquire_async());
-    assert_eq!(acquire_size, size_of::<WaitQueue>() * 2);
-    let acquire_with_size = size_of_val(&semaphore.acquire_async_with(|| {}));
-    assert_eq!(acquire_with_size, size_of::<WaitQueue>() * 2);
-    let acquire_many_size = size_of_val(&semaphore.acquire_many_async(1));
-    assert_eq!(acquire_many_size, size_of::<WaitQueue>() * 2);
-    let acquire_many_with_size = size_of_val(&semaphore.acquire_many_async_with(1, || {}));
-    assert_eq!(acquire_many_with_size, size_of::<WaitQueue>() * 2);
+
+    let acquire_fut = &semaphore.acquire_async();
+    assert_eq!(size_of_val(acquire_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(acquire_fut), align_of::<WaitQueue>());
+
+    let acquire_with_fut = &semaphore.acquire_async_with(|| {});
+    assert_eq!(size_of_val(acquire_with_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(acquire_with_fut), align_of::<WaitQueue>());
+
+    let acquire_many_fut = &semaphore.acquire_many_async(1);
+    assert_eq!(size_of_val(acquire_many_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(acquire_many_fut), align_of::<WaitQueue>());
+
+    let acquire_many_with_fut = &semaphore.acquire_many_async_with(1, || {});
+    assert_eq!(
+        size_of_val(acquire_many_with_fut),
+        size_of::<WaitQueue>() * 2
+    );
+    assert_eq!(align_of_val(acquire_many_with_fut), align_of::<WaitQueue>());
 
     let gate = Gate::default();
-    let enter_size = size_of_val(&gate.enter_async());
-    assert_eq!(enter_size, size_of::<WaitQueue>() * 2);
-    let enter_with_size = size_of_val(&gate.enter_async_with(|| {}));
-    assert_eq!(enter_with_size, size_of::<WaitQueue>() * 2);
+
+    let enter_fut = &gate.enter_async();
+    assert_eq!(size_of_val(enter_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(enter_fut), align_of::<WaitQueue>());
+
+    let enter_with_fut = &gate.enter_async_with(|| {});
+    assert_eq!(size_of_val(enter_with_fut), size_of::<WaitQueue>() * 2);
+    assert_eq!(align_of_val(enter_with_fut), align_of::<WaitQueue>());
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
@@ -809,6 +832,67 @@ async fn semaphore_chaos() {
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn gate_pager() {
+    let num_tasks = 8;
+    let num_iters = 64;
+    let check = Arc::new(AtomicUsize::new(0));
+    let granted = AtomicUsize::new(0);
+    let gate = Arc::new(Gate::default());
+
+    let mut threads = Vec::new();
+    let mut tasks = Vec::new();
+    for i in 0..num_tasks {
+        let check = check.clone();
+        let gate = gate.clone();
+        if i % 2 == 0 {
+            tasks.push(tokio::spawn(async move {
+                let mut pager = Pager::default();
+                for _ in 0..num_iters {
+                    let mut pinned_pager = Pin::new(&mut pager);
+                    gate.register_async(&mut pinned_pager);
+                    match pinned_pager.await {
+                        Ok(_) => {
+                            check.fetch_add(1, Relaxed);
+                        }
+                        Err(e) => unreachable!("{e:?}"),
+                    }
+                }
+            }));
+        } else {
+            threads.push(thread::spawn(move || {
+                let mut pager = Pager::default();
+                for _ in 0..num_iters {
+                    let mut pinned_pager = Pin::new(&mut pager);
+                    gate.register_sync(&mut pinned_pager);
+                    match pinned_pager.poll_sync() {
+                        Ok(_) => {
+                            check.fetch_add(1, Relaxed);
+                        }
+                        Err(e) => unreachable!("{e:?}"),
+                    }
+                }
+            }));
+        }
+    }
+
+    while granted.load(Relaxed) != num_iters * num_tasks {
+        if let Ok(n) = gate.permit() {
+            granted.fetch_add(n, Relaxed);
+        }
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(check.load(Relaxed), granted.load(Relaxed));
+}
+
+#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn gate_chaos() {
     let num_tasks = 16;
     let num_iters = 2048;
@@ -837,7 +921,7 @@ async fn gate_chaos() {
             threads.push(thread::spawn(move || {
                 for j in 0..num_iters {
                     if j % 7 == 5 {
-                        let mut pager = gate::Pager::default();
+                        let mut pager = Pager::default();
                         let mut pinned_pager = Pin::new(&mut pager);
                         if i % 3 == 0 {
                             assert!(gate.register_async(&mut pinned_pager));

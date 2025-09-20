@@ -1,8 +1,8 @@
 # Changelog
 
-3.4.0
+4.0.0
 
-* Remove the 128B alignment constraint from the wait queue entry.
+* Add the `Pager` API for all the synchronization primitives.
 
 3.3.0
 

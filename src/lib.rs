@@ -7,6 +7,9 @@ pub use gate::Gate;
 mod lock;
 pub use lock::Lock;
 
+mod pager;
+pub use pager::Pager;
+
 mod semaphore;
 pub use semaphore::Semaphore;
 

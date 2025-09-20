@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
 use loom::sync::atomic::AtomicUsize;
 
 use crate::opcode::Opcode;
+use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
 
@@ -482,5 +483,19 @@ impl SyncPrimitive for Semaphore {
     #[inline]
     fn max_shared_owners() -> usize {
         Self::MAX_PERMITS
+    }
+
+    #[inline]
+    fn drop_wait_queue_entry(entry: &WaitQueue) {
+        Self::force_remove_wait_queue_entry(entry);
+    }
+}
+
+impl SyncResult for Semaphore {
+    type Result = Result<(), pager::Error>;
+
+    #[inline]
+    fn to_result(_: u8, pager_error: Option<pager::Error>) -> Self::Result {
+        pager_error.map_or_else(|| Ok(()), Err)
     }
 }

@@ -51,7 +51,7 @@ struct AsyncContext {
     /// Waker to wake an executor when the result is ready.
     waker: UnsafeCell<Option<Waker>>,
     /// Context cleaner when an asynchronous [`WaitQueue`] is cancelled.
-    cleaner: fn(&WaitQueue),
+    drop_callback: fn(&WaitQueue),
 }
 
 /// Contextual data for synchronous [`WaitQueue`].
@@ -107,7 +107,7 @@ impl WaitQueue {
         } else {
             Monitor::Async(AsyncContext {
                 waker: UnsafeCell::new(None),
-                cleaner: S::cleanup_wait_queue,
+                drop_callback: S::drop_wait_queue_entry,
             })
         };
         Self {
@@ -424,7 +424,7 @@ impl Drop for WaitQueue {
         };
         let state = self.state.load(Acquire);
         if state & Self::ENQUEUED == Self::ENQUEUED && state & Self::RESULT_ACKED == 0 {
-            (async_context.cleaner)(self);
+            (async_context.drop_callback)(self);
         }
     }
 }

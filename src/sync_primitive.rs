@@ -21,6 +21,9 @@ pub(crate) trait SyncPrimitive: Sized {
     /// Returns the maximum number of shared owners.
     fn max_shared_owners() -> usize;
 
+    /// Called when an enqueued wait queue entry is being dropped without acknowledging the result.
+    fn drop_wait_queue_entry(entry: &WaitQueue);
+
     /// Converts a reference to `Self` into a memory address.
     fn addr(&self) -> usize {
         let self_ptr: *const Self = addr_of!(*self);
@@ -258,9 +261,9 @@ pub(crate) trait SyncPrimitive: Sized {
         }
     }
 
-    /// Cleans up a [`WaitQueue`] entry that was pushed into the wait queue, but has not been
+    /// Removes a [`WaitQueue`] entry that was pushed into the wait queue, but has not been
     /// processed.
-    fn cleanup_wait_queue(entry: &WaitQueue) {
+    fn force_remove_wait_queue_entry(entry: &WaitQueue) {
         let this: &Self = entry.sync_primitive_ref();
         let wait_queue_ptr: *const WaitQueue = addr_of!(*entry);
         let wait_queue_addr = wait_queue_ptr.expose_provenance();
@@ -320,45 +323,6 @@ pub(crate) trait SyncPrimitive: Sized {
 
         if let Some(f) = self.try_push_wait_queue_entry(pinned_async_wait.0, state, || ()) {
             f();
-        }
-    }
-}
-
-impl Opcode {
-    /// Checks if the resourced expressed in `self` can be released from `state`.
-    #[inline]
-    pub(crate) const fn can_release(self, state: usize) -> bool {
-        match self {
-            Opcode::Exclusive => {
-                let data = state & WaitQueue::DATA_MASK;
-                data == WaitQueue::DATA_MASK
-            }
-            Opcode::Shared => {
-                let data = state & WaitQueue::DATA_MASK;
-                data >= 1 && data != WaitQueue::DATA_MASK
-            }
-            Opcode::Semaphore(count) => {
-                let data = state & WaitQueue::DATA_MASK;
-                let count = count as usize;
-                data >= count
-            }
-            Opcode::Wait => true,
-        }
-    }
-
-    /// Converts the operation mode into a `usize` value representing resources held by the
-    /// corresponding synchronization primitive.
-    #[inline]
-    pub(crate) const fn release_count(self) -> usize {
-        match self {
-            Opcode::Exclusive => WaitQueue::DATA_MASK,
-            Opcode::Shared => 1,
-            Opcode::Semaphore(count) => {
-                let count = count as usize;
-                debug_assert!(count <= WaitQueue::LOCKED_FLAG);
-                count
-            }
-            Opcode::Wait => 0,
         }
     }
 }
