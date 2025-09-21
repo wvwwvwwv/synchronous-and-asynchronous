@@ -13,7 +13,7 @@ use loom::sync::atomic::AtomicUsize;
 use crate::opcode::Opcode;
 use crate::wait_queue::WaitQueue;
 
-/// Define base operations for synchronization primitives.
+/// Defines base operations for synchronization primitives.
 pub(crate) trait SyncPrimitive: Sized {
     /// Returns a reference to the state.
     fn state(&self) -> &AtomicUsize;
@@ -57,7 +57,7 @@ pub(crate) trait SyncPrimitive: Sized {
         }
     }
 
-    /// Waits for the desired resources synchronously.
+    /// Waits for the desired resource synchronously.
     fn wait_resources_sync<F: FnOnce()>(
         &self,
         state: usize,
@@ -66,21 +66,17 @@ pub(crate) trait SyncPrimitive: Sized {
     ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
-        let sync_wait = WaitQueue::new(self, mode, true);
-        let pinned_sync_wait = Pin::new(&sync_wait);
-        debug_assert_eq!(
-            addr_of!(sync_wait),
-            WaitQueue::ref_to_ptr(&pinned_sync_wait)
-        );
+        let entry = WaitQueue::new(self, mode, true);
+        let pinned_entry = Pin::new(&entry);
+        debug_assert_eq!(addr_of!(entry), WaitQueue::ref_to_ptr(&pinned_entry));
 
-        if let Some(returned) = self.try_push_wait_queue_entry(pinned_sync_wait, state, begin_wait)
-        {
+        if let Some(returned) = self.try_push_wait_queue_entry(pinned_entry, state, begin_wait) {
             return Err(returned);
         }
-        Ok(pinned_sync_wait.poll_result_sync())
+        Ok(pinned_entry.poll_result_sync())
     }
 
-    /// Releases resources represented by the supplied operation mode.
+    /// Releases the resource represented by the supplied operation mode.
     ///
     /// Returns `false` if the resource cannot be released.
     fn release_loop(&self, mut state: usize, mode: Opcode) -> bool {
@@ -99,7 +95,7 @@ pub(crate) trait SyncPrimitive: Sized {
                     Err(new_state) => state = new_state,
                 }
             } else {
-                // The wait queue is not empty and not being processed.
+                // The wait queue is not empty and is not being processed.
                 let next_state = (state | WaitQueue::LOCKED_FLAG) - mode.release_count();
                 if let Err(new_state) = self
                     .state()
@@ -142,7 +138,7 @@ pub(crate) trait SyncPrimitive: Sized {
                 if data + transferred == 0
                     || data + transferred + desired <= Self::max_shared_owners()
                 {
-                    // The entry can inherit ownerhip.
+                    // The entry can inherit ownership.
                     if prev_entry.is_some() {
                         transferred += desired;
                         resolved_entry_ptr = WaitQueue::ref_to_ptr(entry);
@@ -155,7 +151,7 @@ pub(crate) trait SyncPrimitive: Sized {
                             .compare_exchange(state, data + transferred + desired, AcqRel, Acquire)
                             .is_err()
                         {
-                            // This entry will be processed on a retry.
+                            // This entry will be processed on the next retry.
                             entry.update_next_entry_ptr(null());
                             head_entry_ptr = WaitQueue::ref_to_ptr(entry);
                             reset_failed = true;
@@ -261,7 +257,7 @@ pub(crate) trait SyncPrimitive: Sized {
         }
     }
 
-    /// Removes a [`WaitQueue`] entry that was pushed into the wait queue, but has not been
+    /// Removes a [`WaitQueue`] entry that was pushed into the wait queue but has not been
     /// processed.
     fn force_remove_wait_queue_entry(entry: &WaitQueue) {
         let this: &Self = entry.sync_primitive_ref();
@@ -291,7 +287,7 @@ pub(crate) trait SyncPrimitive: Sized {
                 let (new_state, removed) =
                     this.remove_wait_queue_entry(state | WaitQueue::LOCKED_FLAG, wait_queue_addr);
                 if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
-                    // Need to process the wait queue if it is still locked.
+                    // We need to process the wait queue if it is still locked.
                     this.process_wait_queue(new_state);
                 }
                 if !removed {
@@ -302,27 +298,11 @@ pub(crate) trait SyncPrimitive: Sized {
         }
 
         if need_completion {
-            // The entry was removed from another thread, so will be completed.
+            // The entry was removed by another thread, so it will be completed.
             while !entry.result_finalized() {
                 thread::yield_now();
             }
             this.release_loop(state, entry.opcode());
-        }
-    }
-
-    /// Tests whether dropping a wait queue entry without waiting for its completion is safe.
-    #[cfg(test)]
-    fn test_drop_wait_queue_entry(&self, mode: Opcode) {
-        let state = self.state().load(Acquire);
-        let async_wait = WaitQueue::new(self, mode, false);
-        let pinned_async_wait = crate::wait_queue::PinnedWaitQueue(Pin::new(&async_wait));
-        debug_assert_eq!(
-            addr_of!(async_wait),
-            WaitQueue::ref_to_ptr(&pinned_async_wait.0)
-        );
-
-        if let Some(f) = self.try_push_wait_queue_entry(pinned_async_wait.0, state, || ()) {
-            f();
         }
     }
 }

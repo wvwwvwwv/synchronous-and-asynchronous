@@ -2,8 +2,8 @@
 
 4.0.0
 
-* Add the `Pager` API for all the synchronization primitives.
-* `Semaphore::acquire_many*` returns `false` if the specified count is greater than the maximum allowed.
+* Add the `Pager` API for all synchronization primitives.
+* `Semaphore::acquire_many*` methods return `false` if the specified count is greater than the maximum allowed.
 
 3.3.0
 
@@ -45,7 +45,7 @@
 1.1.0
 
 * Fix a hang issue when an asynchronous task is dropped before completion.
-* Work-in-progress: `saa::Gate`.
+* Work in progress: `saa::Gate`.
 
 1.0.1
 

@@ -143,7 +143,7 @@ impl Semaphore {
             .await;
     }
 
-    /// Gets a permit from the semaphore asynchronously with a wait callback provided.
+    /// Gets a permit from the semaphore asynchronously with a wait callback.
     ///
     /// The callback is invoked when the task starts waiting for a permit.
     ///
@@ -187,9 +187,9 @@ impl Semaphore {
         self.acquire_many_sync_with(1, || ());
     }
 
-    /// Gets multiple permits from the semaphore synchronously with a wait callback provided.
+    /// Gets multiple permits from the semaphore synchronously with a wait callback.
     ///
-    /// The callback is invoked when the task starts waiting for a permit.
+    /// The callback is invoked when the task starts waiting for permits.
     ///
     /// # Examples
     ///
@@ -230,6 +230,8 @@ impl Semaphore {
 
     /// Gets multiple permits from the semaphore asynchronously.
     ///
+    /// Returns `false` if the count exceeds [`Self::MAX_PERMITS`].
+    ///
     /// # Examples
     ///
     /// ```
@@ -239,21 +241,22 @@ impl Semaphore {
     /// let semaphore = Semaphore::default();
     ///
     /// async {
-    ///     semaphore.acquire_many_async(11).await;
+    ///     assert!(semaphore.acquire_many_async(11).await);
     ///     assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 11);
     /// };
     /// ```
     #[inline]
-    pub async fn acquire_many_async(&self, count: usize) {
+    pub async fn acquire_many_async(&self, count: usize) -> bool {
         #[allow(clippy::cast_possible_truncation)]
         let async_wait = WaitQueue::new(self, Opcode::Semaphore(count as u8), false);
         self.acquire_async_with_internal(&async_wait, count, || {})
-            .await;
+            .await
     }
 
-    /// Gets multiple permits from the semaphore asynchronously with a wait callback provided.
+    /// Gets multiple permits from the semaphore asynchronously with a wait callback.
     ///
-    /// The callback is invoked when the task starts waiting for permits.
+    /// Returns `false` if the count exceeds [`Self::MAX_PERMITS`]. The callback is invoked when the
+    /// task starts waiting for permits.
     ///
     /// # Examples
     ///
@@ -265,20 +268,22 @@ impl Semaphore {
     ///
     /// async {
     ///     let mut wait = false;
-    ///     semaphore.acquire_many_async_with(2, || { wait = true; }).await;
+    ///     assert!(semaphore.acquire_many_async_with(2, || { wait = true; }).await);
     ///     assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 2);
     ///     assert!(!wait);
     /// };
     /// ```
     #[inline]
-    pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) {
+    pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) -> bool {
         #[allow(clippy::cast_possible_truncation)]
         let async_wait = WaitQueue::new(self, Opcode::Semaphore(count as u8), false);
         self.acquire_async_with_internal(&async_wait, count, begin_wait)
-            .await;
+            .await
     }
 
     /// Gets multiple permits from the semaphore synchronously.
+    ///
+    /// Returns `false` if the count exceeds [`Self::MAX_PERMITS`].
     ///
     /// # Examples
     ///
@@ -288,17 +293,18 @@ impl Semaphore {
     ///
     /// let semaphore = Semaphore::default();
     ///
-    /// semaphore.acquire_many_sync(11);
+    /// assert!(semaphore.acquire_many_sync(11));
     /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 11);
     /// ```
     #[inline]
-    pub fn acquire_many_sync(&self, count: usize) {
-        self.acquire_many_sync_with(count, || ());
+    pub fn acquire_many_sync(&self, count: usize) -> bool {
+        self.acquire_many_sync_with(count, || ())
     }
 
-    /// Gets multiple permits from the semaphore synchronously with a callback provided.
+    /// Gets multiple permits from the semaphore synchronously with a wait callback.
     ///
-    /// The callback is invoked when the task starts waiting for permits.
+    /// Returns `false` if the count exceeds [`Self::MAX_PERMITS`]. The callback is invoked when the
+    /// task starts waiting for permits.
     ///
     /// # Examples
     ///
@@ -309,26 +315,30 @@ impl Semaphore {
     /// let semaphore = Semaphore::default();
     ///
     /// let mut wait = false;
-    /// semaphore.acquire_many_sync_with(2, || { wait = true; });
+    /// assert!(semaphore.acquire_many_sync_with(2, || { wait = true; }));
     /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 2);
     /// assert!(!wait);
     /// ```
     #[inline]
-    pub fn acquire_many_sync_with<F: FnOnce()>(&self, count: usize, mut begin_wait: F) {
+    pub fn acquire_many_sync_with<F: FnOnce()>(&self, count: usize, mut begin_wait: F) -> bool {
+        if count > Self::MAX_PERMITS {
+            return false;
+        }
+        let Ok(count) = u8::try_from(count) else {
+            return false;
+        };
         loop {
-            // TODO: return false if count > max;
             let (result, state) = self.try_acquire_internal(count);
             if result {
-                return;
+                return true;
             }
             // The value is checked in `try_acquire_internal`.
-            #[allow(clippy::cast_possible_truncation)]
             if let Err(returned) =
-                self.wait_resources_sync(state, Opcode::Semaphore(count as u8), begin_wait)
+                self.wait_resources_sync(state, Opcode::Semaphore(count), begin_wait)
             {
                 begin_wait = returned;
             } else {
-                return;
+                return true;
             }
         }
     }
@@ -349,16 +359,22 @@ impl Semaphore {
     /// ```
     #[inline]
     pub fn try_acquire_many(&self, count: usize) -> bool {
+        if count > Self::MAX_PERMITS {
+            return false;
+        }
+        let Ok(count) = u8::try_from(count) else {
+            return false;
+        };
         self.try_acquire_internal(count).0
     }
 
-    /// Registers a [`Pager`] to allow it get a permit remotely.
+    /// Registers a [`Pager`] to allow it to get a permit remotely.
     ///
-    /// `is_sync` indicates whether the [`Pager`] will be asynchronously (false), or synchronously
-    /// (true) polled.
+    /// `is_sync` indicates whether the [`Pager`] will be polled asynchronously (`false`) or
+    /// synchronously (`true`).
     ///
     /// Returns `false` if the [`Pager`] was already registered, or if the count is greater than the
-    /// maximum permits.
+    /// maximum number of permits.
     ///
     /// # Examples
     ///
@@ -387,10 +403,11 @@ impl Semaphore {
         if pager.entry().is_some() || count > Self::MAX_PERMITS {
             return false;
         }
+        let Ok(count) = u8::try_from(count) else {
+            return false;
+        };
 
-        #[allow(clippy::cast_possible_truncation)]
-        let u8_count = count as u8;
-        pager.set_entry(WaitQueue::new(self, Opcode::Semaphore(u8_count), is_sync));
+        pager.set_entry(WaitQueue::new(self, Opcode::Semaphore(count), is_sync));
         loop {
             let Some(entry) = pager.entry() else {
                 continue;
@@ -477,42 +494,48 @@ impl Semaphore {
         wait_queue: &WaitQueue,
         count: usize,
         mut begin_wait: F,
-    ) {
-        let pinned_async_wait = PinnedWaitQueue(Pin::new(wait_queue));
+    ) -> bool {
+        if count > Semaphore::MAX_PERMITS {
+            return false;
+        }
+        let Ok(count) = u8::try_from(count) else {
+            return false;
+        };
+        let pinned_entry = PinnedWaitQueue(Pin::new(wait_queue));
         loop {
             let (result, state) = self.try_acquire_internal(count);
             if result {
-                return;
+                return true;
             }
             debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
             if let Some(returned) =
-                self.try_push_wait_queue_entry(pinned_async_wait.0, state, begin_wait)
+                self.try_push_wait_queue_entry(pinned_entry.0, state, begin_wait)
             {
                 begin_wait = returned;
                 continue;
             }
 
-            pinned_async_wait.await;
-            return;
+            pinned_entry.await;
+            return true;
         }
     }
 
     /// Tries to acquire a permit.
     #[inline]
-    fn try_acquire_internal(&self, count: usize) -> (bool, usize) {
+    fn try_acquire_internal(&self, count: u8) -> (bool, usize) {
         let mut state = self.state.load(Acquire);
         loop {
             if state & WaitQueue::ADDR_MASK != 0
-                || (state & WaitQueue::DATA_MASK) + count > Self::MAX_PERMITS
+                || (state & WaitQueue::DATA_MASK) + usize::from(count) > Self::MAX_PERMITS
             {
-                // There is a waiting thread, or the lock can no longer be shared.
+                // There is a waiting thread, or the semaphore can no longer be shared.
                 return (false, state);
             }
 
             match self
                 .state
-                .compare_exchange(state, state + count, Acquire, Acquire)
+                .compare_exchange(state, state + usize::from(count), Acquire, Acquire)
             {
                 Ok(_) => return (true, 0),
                 Err(new_state) => state = new_state,

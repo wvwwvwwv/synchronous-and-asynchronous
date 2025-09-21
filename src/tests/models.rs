@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -5,9 +6,7 @@ use loom::sync::atomic::AtomicBool;
 use loom::thread::{spawn, yield_now};
 
 use crate::gate;
-use crate::opcode::Opcode;
-use crate::sync_primitive::SyncPrimitive;
-use crate::{Gate, Lock, Semaphore};
+use crate::{Gate, Lock, Pager, Semaphore};
 
 #[test]
 fn lock_shared() {
@@ -192,7 +191,12 @@ fn drop_future() {
         let thread = spawn(move || {
             semaphore_clone.acquire_many_sync(9);
         });
-        semaphore.test_drop_wait_queue_entry(Opcode::Semaphore(11));
+        {
+            let mut pager = Pager::default();
+            let mut pinned_pager = Pin::new(&mut pager);
+            assert!(semaphore.register_pager(&mut pinned_pager, 11, false));
+        }
+
         assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
         assert!(thread.join().is_ok());
     });

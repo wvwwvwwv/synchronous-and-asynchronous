@@ -8,7 +8,24 @@ use std::task::{Context, Poll};
 
 use crate::wait_queue::WaitQueue;
 
-/// Tasks holding a [`Pager`] can remotely get a desired resource.
+/// Tasks holding a [`Pager`] can remotely acquire a desired resource.
+///
+/// [`Pager`] contains a wait queue entry which forms an intrusive linked list. It is important that
+/// the [`Pager`] is not moved while it is registered in a synchronization primitive, otherwise it
+/// may lead to undefined behavior. For instance, the following code may lead to illegal memory
+/// access.
+///
+/// ```
+/// # use std::pin::Pin;
+/// # use saa::{Lock, Pager};
+/// # use saa::lock::Mode;
+/// # let lock = Lock::default();
+///
+/// let mut pager = Pager::default();
+/// let mut pinned_pager = Pin::new(&mut pager);
+/// assert!(lock.register_pager(&mut pinned_pager, Mode::Exclusive, false));
+/// drop(pager); // The pager is moved to `drop`.
+/// ```
 #[derive(Debug, Default)]
 pub struct Pager<'s, S: SyncResult> {
     /// The wait queue entry for the [`Pager`].
@@ -28,7 +45,7 @@ pub enum Error {
     NotReady,
 }
 
-/// Define result value interpretation interfaces.
+/// Defines result value interpretation interfaces.
 pub trait SyncResult: Sized {
     /// Operation result type.
     type Result: Clone + Copy + Eq + PartialEq;

@@ -11,12 +11,12 @@ pub(crate) enum Opcode {
     Shared,
     /// Acquires semaphores.
     Semaphore(u8),
-    /// Waits for a condition without trying to acquire resources.
+    /// Waits for a condition without trying to acquire a resource.
     Wait,
 }
 
 impl Opcode {
-    /// Checks if the resourced expressed in `self` can be released from `state`.
+    /// Checks if the resource expressed in `self` can be released from `state`.
     #[inline]
     pub(crate) const fn can_release(self, state: usize) -> bool {
         match self {
@@ -37,7 +37,7 @@ impl Opcode {
         }
     }
 
-    /// Converts the operation mode into a `usize` value representing resources held by the
+    /// Converts the operation mode into a `usize` value representing the resource held by the
     /// corresponding synchronization primitive.
     #[inline]
     pub(crate) const fn release_count(self) -> usize {

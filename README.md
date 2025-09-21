@@ -8,12 +8,13 @@ Low-level synchronization primitives providing both asynchronous and synchronous
 
 ## Features
 
+- No hidden global variables.
 - Provides both asynchronous and synchronous interfaces.
 - [`Loom`](https://github.com/tokio-rs/loom) support: `features = ["loom"]`.
 
 ## Lock
 
-`saa::Lock` is a low-level shared-exclusive lock providing both asynchronous and synchronous interfaces. Synchronous locking methods such as `lock_sync` and `share_sync` can be used alongside their asynchronous counterparts `lock_async` and `share_async` simultaneously. `saa::Lock` implements a heap-allocation-free fair wait queue shared between both synchronous and asynchronous methods.
+`saa::Lock` is a low-level shared-exclusive lock providing both asynchronous and synchronous interfaces. Synchronous locking methods such as `lock_sync` and `share_sync` can be used alongside their asynchronous counterparts `lock_async` and `share_async` simultaneously. `saa::Lock` implements an allocation-free fair wait queue shared between both synchronous and asynchronous methods.
 
 ### Examples
 
@@ -96,6 +97,29 @@ while cnt != 4 {
 for thread in threads {
     thread.join().unwrap();
 }
+```
+
+## Pager
+
+`saa::Pager` allows to remotely wait for a resource to become available.
+
+### Examples
+
+```rust
+use std::pin::Pin;
+
+use saa::{Gate, Pager};
+use saa::gate::State;
+
+let gate = Gate::default();
+
+let mut pager = Pager::default();
+let mut pinned_pager = Pin::new(&mut pager);
+
+assert!(gate.register_pager(&mut pinned_pager, true));
+assert_eq!(gate.open().1, 1);
+
+assert_eq!(pinned_pager.poll_sync(), Ok(State::Open));
 ```
 
 ## Notes

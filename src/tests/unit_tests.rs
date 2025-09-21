@@ -5,10 +5,8 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
-use crate::opcode::Opcode;
-use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::WaitQueue;
-use crate::{Gate, Lock, Pager, Semaphore, gate};
+use crate::{Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
@@ -451,12 +449,68 @@ async fn lock_poison_wait_async() {
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn lock_pager() {
+    let num_tasks = 8;
+    let num_iters = 64;
+    let check = Arc::new(AtomicUsize::new(0));
+    let lock = Arc::new(Lock::default());
+
+    let mut threads = Vec::new();
+    let mut tasks = Vec::new();
+    for i in 0..num_tasks {
+        let check = check.clone();
+        let lock = lock.clone();
+        if i % 2 == 0 {
+            tasks.push(tokio::spawn(async move {
+                let mut pager = Pager::default();
+                for _ in 0..num_iters {
+                    let mut pinned_pager = Pin::new(&mut pager);
+                    lock.register_pager(&mut pinned_pager, lock::Mode::Shared, false);
+                    match pinned_pager.await {
+                        Ok(true) => {
+                            check.fetch_add(1, Relaxed);
+                            lock.release_share();
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }));
+        } else {
+            threads.push(thread::spawn(move || {
+                let mut pager = Pager::default();
+                for _ in 0..num_iters {
+                    let mut pinned_pager = Pin::new(&mut pager);
+                    lock.register_pager(&mut pinned_pager, lock::Mode::Exclusive, true);
+                    match pinned_pager.poll_sync() {
+                        Ok(true) => {
+                            check.fetch_add(1, Relaxed);
+                            lock.release_lock();
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }));
+        }
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(check.load(Relaxed), num_iters * num_tasks);
+}
+
+#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn semaphore_async() {
     let num_tasks = 64;
     let check = Arc::new(AtomicUsize::new(0));
     let semaphore = Arc::new(Semaphore::default());
 
-    semaphore.acquire_many_sync(Semaphore::MAX_PERMITS);
+    assert!(semaphore.acquire_many_sync(Semaphore::MAX_PERMITS));
     check.fetch_add(Semaphore::MAX_PERMITS, Relaxed);
 
     let mut tasks = Vec::new();
@@ -489,7 +543,7 @@ async fn semaphore_async() {
 
     assert_eq!(check.load(Relaxed), 0);
 
-    semaphore.acquire_many_async(Semaphore::MAX_PERMITS).await;
+    assert!(semaphore.acquire_many_async(Semaphore::MAX_PERMITS).await);
     assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
 }
 
@@ -504,7 +558,7 @@ fn semaphore_sync() {
     let check = Arc::new(AtomicUsize::new(0));
     let semaphore = Arc::new(Semaphore::default());
 
-    semaphore.acquire_many_sync(Semaphore::MAX_PERMITS);
+    assert!(semaphore.acquire_many_sync(Semaphore::MAX_PERMITS));
     check.fetch_add(Semaphore::MAX_PERMITS, Relaxed);
 
     let mut threads = Vec::new();
@@ -513,7 +567,7 @@ fn semaphore_sync() {
         let semaphore = semaphore.clone();
         threads.push(thread::spawn(move || {
             for _ in 0..num_iters {
-                semaphore.acquire_many_sync(i + 1);
+                assert!(semaphore.acquire_many_sync(i + 1));
                 assert!(check.fetch_add(i + 1, Relaxed) + i < Semaphore::MAX_PERMITS);
                 thread::sleep(Duration::from_micros(1));
                 check.fetch_sub(i + 1, Relaxed);
@@ -542,7 +596,7 @@ fn semaphore_sync_wait_callback() {
     let barrier = Arc::new(Barrier::new(num_threads + 1));
     let semaphore = Arc::new(Semaphore::default());
 
-    semaphore.acquire_many_sync(Semaphore::MAX_PERMITS);
+    assert!(semaphore.acquire_many_sync(Semaphore::MAX_PERMITS));
 
     let mut threads = Vec::new();
     for i in 0..num_threads {
@@ -579,7 +633,7 @@ async fn semaphore_async_wait_callback() {
     let barrier = Arc::new(AtomicUsize::new(num_tasks));
     let semaphore = Arc::new(Semaphore::default());
 
-    semaphore.acquire_many_sync(Semaphore::MAX_PERMITS);
+    assert!(semaphore.acquire_many_sync(Semaphore::MAX_PERMITS));
 
     let mut tasks = Vec::new();
     for i in 0..num_tasks {
@@ -613,6 +667,64 @@ async fn semaphore_async_wait_callback() {
     for task in tasks {
         task.await.unwrap();
     }
+}
+
+#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn semaphore_pager() {
+    let num_tasks = 8;
+    let num_iters = 64;
+    let check = Arc::new(AtomicUsize::new(0));
+    let semaphore = Arc::new(Semaphore::default());
+
+    let mut threads = Vec::new();
+    let mut tasks = Vec::new();
+    for i in 0..num_tasks {
+        let check = check.clone();
+        let semaphore = semaphore.clone();
+        if i % 2 == 0 {
+            tasks.push(tokio::spawn(async move {
+                let mut pager = Pager::default();
+                for _ in 0..num_iters {
+                    let mut pinned_pager = Pin::new(&mut pager);
+                    assert!(!semaphore.register_pager(&mut pinned_pager, usize::MAX, false));
+                    semaphore.register_pager(&mut pinned_pager, Semaphore::MAX_PERMITS, false);
+                    match pinned_pager.await {
+                        Ok(()) => {
+                            check.fetch_add(1, Relaxed);
+                            semaphore.release_many(Semaphore::MAX_PERMITS);
+                        }
+                        Err(e) => unreachable!("{e:?}"),
+                    }
+                }
+            }));
+        } else {
+            threads.push(thread::spawn(move || {
+                let mut pager = Pager::default();
+                for _ in 0..num_iters {
+                    let mut pinned_pager = Pin::new(&mut pager);
+                    assert!(!semaphore.register_pager(&mut pinned_pager, usize::MAX, true));
+                    semaphore.register_pager(&mut pinned_pager, Semaphore::MAX_PERMITS, true);
+                    match pinned_pager.poll_sync() {
+                        Ok(()) => {
+                            check.fetch_add(1, Relaxed);
+                            semaphore.release_many(Semaphore::MAX_PERMITS);
+                        }
+                        Err(e) => unreachable!("{e:?}"),
+                    }
+                }
+            }));
+        }
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(check.load(Relaxed), num_iters * num_tasks);
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
@@ -686,150 +798,6 @@ fn gate_sync() {
     }
 }
 
-#[test]
-fn drop_future() {
-    let lock = Arc::new(Lock::default());
-
-    lock.lock_sync();
-
-    let mut threads = Vec::new();
-    for i in 0..2 {
-        let lock = lock.clone();
-        threads.push(thread::spawn(move || {
-            if i == 0 {
-                lock.lock_sync();
-                assert!(lock.release_lock());
-            } else {
-                lock.share_sync();
-                assert!(lock.release_share());
-            }
-        }));
-    }
-
-    lock.test_drop_wait_queue_entry(Opcode::Exclusive);
-    lock.test_drop_wait_queue_entry(Opcode::Shared);
-    assert!(lock.release_lock());
-
-    for thread in threads {
-        thread.join().unwrap();
-    }
-
-    lock.lock_sync();
-    assert!(lock.release_lock());
-}
-
-#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-async fn lock_chaos() {
-    let num_tasks = Lock::MAX_SHARED_OWNERS;
-    let num_iters = 2048;
-    let check = Arc::new(AtomicUsize::new(0));
-    let lock = Arc::new(Lock::default());
-
-    let mut threads = Vec::new();
-    let mut tasks = Vec::new();
-    for i in 0..num_tasks {
-        let check = check.clone();
-        let lock = lock.clone();
-        if i % 2 == 0 {
-            tasks.push(tokio::spawn(async move {
-                for j in 0..num_iters {
-                    assert!(!lock.is_poisoned(Relaxed));
-                    if j % 11 == 0 {
-                        assert!(lock.lock_async().await);
-                        assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
-                        check.fetch_sub(usize::MAX, Relaxed);
-                        assert!(lock.release_lock());
-                    } else {
-                        assert!(lock.share_async().await);
-                        assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
-                        check.fetch_sub(1, Relaxed);
-                        assert!(lock.release_share());
-                    }
-                    assert!(!lock.is_poisoned(Relaxed));
-                }
-            }));
-        } else {
-            threads.push(thread::spawn(move || {
-                for j in 0..num_iters {
-                    assert!(!lock.is_poisoned(Relaxed));
-                    if j % 7 == 3 {
-                        lock.test_drop_wait_queue_entry(Opcode::Exclusive);
-                    } else if j % 11 == 0 {
-                        assert!(lock.lock_sync());
-                        assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
-                        check.fetch_sub(usize::MAX, Relaxed);
-                        assert!(lock.release_lock());
-                    } else {
-                        assert!(lock.share_sync());
-                        assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
-                        check.fetch_sub(1, Relaxed);
-                        assert!(lock.release_share());
-                    }
-                    assert!(!lock.is_poisoned(Relaxed));
-                }
-            }));
-        }
-    }
-
-    for thread in threads {
-        thread.join().unwrap();
-    }
-    for task in tasks {
-        task.await.unwrap();
-    }
-
-    assert_eq!(check.load(Relaxed), 0);
-}
-
-#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-async fn semaphore_chaos() {
-    let num_tasks = Semaphore::MAX_PERMITS;
-    let num_iters = 2048;
-    let check = Arc::new(AtomicUsize::new(0));
-    let semaphore = Arc::new(Semaphore::default());
-
-    let mut threads = Vec::new();
-    let mut tasks = Vec::new();
-    for i in 0..num_tasks {
-        let check = check.clone();
-        let semaphore = semaphore.clone();
-        if i % 2 == 0 {
-            tasks.push(tokio::spawn(async move {
-                for _ in 0..num_iters {
-                    semaphore.acquire_many_async(i + 1).await;
-                    assert!(check.fetch_add(i + 1, Relaxed) + i < Semaphore::MAX_PERMITS);
-                    check.fetch_sub(i + 1, Relaxed);
-                    assert!(semaphore.release_many(i + 1));
-                }
-            }));
-        } else {
-            threads.push(thread::spawn(move || {
-                for j in 0..num_iters {
-                    if j % 7 == 1 {
-                        semaphore.test_drop_wait_queue_entry(Opcode::Semaphore(27));
-                    } else {
-                        semaphore.acquire_many_sync(i + 1);
-                        assert!(check.fetch_add(i + 1, Relaxed) + i < Semaphore::MAX_PERMITS);
-                        check.fetch_sub(i + 1, Relaxed);
-                        assert!(semaphore.release_many(i + 1));
-                    }
-                }
-            }));
-        }
-    }
-
-    for thread in threads {
-        thread.join().unwrap();
-    }
-    for task in tasks {
-        task.await.unwrap();
-    }
-
-    assert_eq!(check.load(Relaxed), 0);
-}
-
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn gate_pager() {
@@ -889,6 +857,180 @@ async fn gate_pager() {
     }
 
     assert_eq!(check.load(Relaxed), granted.load(Relaxed));
+}
+
+#[test]
+fn pager_drop_implicit() {
+    let lock = Arc::new(Lock::default());
+
+    lock.lock_sync();
+
+    let mut threads = Vec::new();
+    for i in 0..2 {
+        let lock = lock.clone();
+        threads.push(thread::spawn(move || {
+            if i == 0 {
+                lock.lock_sync();
+                assert!(lock.release_lock());
+            } else {
+                lock.share_sync();
+                assert!(lock.release_share());
+            }
+        }));
+    }
+
+    for is_sync in [false, true] {
+        let mut pager = Pager::default();
+        let mut pinned_pager = Pin::new(&mut pager);
+        lock.register_pager(&mut pinned_pager, lock::Mode::Exclusive, is_sync);
+    }
+
+    assert!(lock.release_lock());
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    lock.lock_sync();
+    assert!(lock.release_lock());
+}
+
+#[test]
+fn pager_drop_explicit() {
+    let semaphore = Arc::new(Semaphore::default());
+    assert!(semaphore.acquire_many_sync(Semaphore::MAX_PERMITS));
+
+    let semaphore_clone = semaphore.clone();
+    let thread = thread::spawn(move || {
+        assert!(semaphore_clone.acquire_many_sync(9));
+    });
+
+    {
+        let mut pager = Pager::default();
+        let mut pinned_pager = Pin::new(&mut pager);
+        assert!(semaphore.register_pager(&mut pinned_pager, 11, false));
+    }
+
+    assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
+    assert!(thread.join().is_ok());
+}
+
+#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn lock_chaos() {
+    let num_tasks = Lock::MAX_SHARED_OWNERS;
+    let num_iters = 2048;
+    let check = Arc::new(AtomicUsize::new(0));
+    let lock = Arc::new(Lock::default());
+
+    let mut threads = Vec::new();
+    let mut tasks = Vec::new();
+    for i in 0..num_tasks {
+        let check = check.clone();
+        let lock = lock.clone();
+        if i % 2 == 0 {
+            tasks.push(tokio::spawn(async move {
+                for j in 0..num_iters {
+                    assert!(!lock.is_poisoned(Relaxed));
+                    if j % 11 == 0 {
+                        assert!(lock.lock_async().await);
+                        assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
+                        check.fetch_sub(usize::MAX, Relaxed);
+                        assert!(lock.release_lock());
+                    } else {
+                        assert!(lock.share_async().await);
+                        assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
+                        check.fetch_sub(1, Relaxed);
+                        assert!(lock.release_share());
+                    }
+                    assert!(!lock.is_poisoned(Relaxed));
+                }
+            }));
+        } else {
+            threads.push(thread::spawn(move || {
+                for j in 0..num_iters {
+                    assert!(!lock.is_poisoned(Relaxed));
+                    if j % 7 == 3 {
+                        let mut pager = Pager::default();
+                        let mut pinned_pager = Pin::new(&mut pager);
+                        lock.register_pager(&mut pinned_pager, lock::Mode::Exclusive, j % 2 == 0);
+                    } else if j % 11 == 0 {
+                        assert!(lock.lock_sync());
+                        assert_eq!(check.fetch_add(usize::MAX, Relaxed), 0);
+                        check.fetch_sub(usize::MAX, Relaxed);
+                        assert!(lock.release_lock());
+                    } else {
+                        assert!(lock.share_sync());
+                        assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
+                        check.fetch_sub(1, Relaxed);
+                        assert!(lock.release_share());
+                    }
+                    assert!(!lock.is_poisoned(Relaxed));
+                }
+            }));
+        }
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(check.load(Relaxed), 0);
+}
+
+#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn semaphore_chaos() {
+    let num_tasks = Semaphore::MAX_PERMITS;
+    let num_iters = 2048;
+    let check = Arc::new(AtomicUsize::new(0));
+    let semaphore = Arc::new(Semaphore::default());
+
+    let mut threads = Vec::new();
+    let mut tasks = Vec::new();
+    for i in 0..num_tasks {
+        let check = check.clone();
+        let semaphore = semaphore.clone();
+        if i % 2 == 0 {
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..num_iters {
+                    assert!(semaphore.acquire_many_async(i + 1).await);
+                    assert!(check.fetch_add(i + 1, Relaxed) + i < Semaphore::MAX_PERMITS);
+                    check.fetch_sub(i + 1, Relaxed);
+                    assert!(semaphore.release_many(i + 1));
+                    assert!(!semaphore.acquire_many_async(usize::MAX).await);
+                }
+            }));
+        } else {
+            threads.push(thread::spawn(move || {
+                for j in 0..num_iters {
+                    if j % 7 == 1 {
+                        let mut pager = Pager::default();
+                        let mut pinned_pager = Pin::new(&mut pager);
+                        assert!(semaphore.register_pager(&mut pinned_pager, 27, j % 2 == 0));
+                    } else {
+                        assert!(semaphore.acquire_many_sync(i + 1));
+                        assert!(check.fetch_add(i + 1, Relaxed) + i < Semaphore::MAX_PERMITS);
+                        check.fetch_sub(i + 1, Relaxed);
+                        assert!(semaphore.release_many(i + 1));
+                    }
+                    assert!(!semaphore.acquire_many_sync(usize::MAX));
+                }
+            }));
+        }
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(check.load(Relaxed), 0);
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]

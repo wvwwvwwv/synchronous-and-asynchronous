@@ -32,14 +32,18 @@ pub(crate) struct WaitQueue {
     next_entry_ptr: AtomicPtr<Self>,
     /// Points to the entry that was pushed right after this entry.
     prev_entry_ptr: AtomicPtr<Self>,
-    /// Address of the corresponding synchronization primitive.
-    addr: usize,
     /// Operation type.
     opcode: Opcode,
     /// Operation state.
     state: AtomicU16,
+    /// Indicates that the wait queue entry is enqueued.
+    enqueued: std::sync::atomic::AtomicBool, // `Loom` is too slow when it is added to modeling.
     /// Monitors the result.
     monitor: Monitor,
+    /// Context cleanup function when a [`WaitQueue`] is cancelled.
+    drop_callback: fn(&WaitQueue),
+    /// Address of the corresponding synchronization primitive.
+    addr: usize,
 }
 
 /// Helper struct for pinning a [`WaitQueue`] to the stack and awaiting it.
@@ -50,8 +54,6 @@ pub(crate) struct PinnedWaitQueue<'w>(pub(crate) Pin<&'w WaitQueue>);
 struct AsyncContext {
     /// Waker to wake an executor when the result is ready.
     waker: UnsafeCell<Option<Waker>>,
-    /// Context cleaner when an asynchronous [`WaitQueue`] is cancelled.
-    drop_callback: fn(&WaitQueue),
 }
 
 /// Contextual data for synchronous [`WaitQueue`].
@@ -71,34 +73,31 @@ enum Monitor {
 }
 
 impl WaitQueue {
-    /// The wrong mode of [`WaitQueue`] method is used.
+    /// A [`WaitQueue`] method is used in the wrong mode.
     pub(crate) const ERROR_WRONG_MODE: u8 = u8::MAX;
 
     /// Indicates that the wait queue is being processed by a thread.
     pub(crate) const LOCKED_FLAG: usize = align_of::<Self>() >> 1;
 
-    /// Mark to extract additional information tagged with the [`WaitQueue`] memory address.
+    /// Mask to extract additional information tagged with the [`WaitQueue`] memory address.
     pub(crate) const DATA_MASK: usize = (align_of::<Self>() >> 1) - 1;
 
     /// Mask to extract the memory address part from a `usize` value.
     pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
 
-    /// Indicates that the wait queue is enqueued.
-    const ENQUEUED: u16 = 1_u16 << u8::BITS;
-
     /// Indicates that a result is set.
-    const RESULT_SET: u16 = 1_u16 << (u8::BITS + 1);
+    const RESULT_SET: u16 = 1_u16 << u8::BITS;
 
     /// Indicates that a waker is set.
-    const WAKER_SET: u16 = 1_u16 << (u8::BITS + 2);
+    const WAKER_SET: u16 = 1_u16 << (u8::BITS + 1);
 
     /// Indicates that a result is finalized.
-    const RESULT_FINALIZED: u16 = 1_u16 << (u8::BITS + 3);
+    const RESULT_FINALIZED: u16 = 1_u16 << (u8::BITS + 2);
 
     /// Indicates that a result is acknowledged.
-    const RESULT_ACKED: u16 = 1_u16 << (u8::BITS + 4);
+    const RESULT_ACKED: u16 = 1_u16 << (u8::BITS + 3);
 
-    /// Creates a new [`WaitQueue`] for asynchronous method.
+    /// Creates a new [`WaitQueue`].
     pub(crate) fn new<S: SyncPrimitive>(this: &S, opcode: Opcode, is_sync: bool) -> Self {
         let monitor = if is_sync {
             Monitor::Sync(SyncContext {
@@ -107,16 +106,17 @@ impl WaitQueue {
         } else {
             Monitor::Async(AsyncContext {
                 waker: UnsafeCell::new(None),
-                drop_callback: S::drop_wait_queue_entry,
             })
         };
         Self {
             next_entry_ptr: AtomicPtr::new(null_mut()),
             prev_entry_ptr: AtomicPtr::new(null_mut()),
-            addr: this.addr(),
             opcode,
             state: AtomicU16::new(0),
+            enqueued: std::sync::atomic::AtomicBool::new(false),
             monitor,
+            drop_callback: S::drop_wait_queue_entry,
+            addr: this.addr(),
         }
     }
 
@@ -189,7 +189,9 @@ impl WaitQueue {
         }
     }
 
-    /// Forward-iterates over entries, and returns `true` when the supplied closure returns `true`.
+    /// Forward-iterates over entries, calling the supplied closure for each entry.
+    ///
+    /// Stops iteration if the closure returns `true`.
     pub(crate) fn iter_forward<F: FnMut(&Self, Option<&Self>) -> bool>(
         tail_entry_ptr: *const Self,
         set_prev: bool,
@@ -214,7 +216,9 @@ impl WaitQueue {
         }
     }
 
-    /// Backward-iterates over entries, and returns `true` when the supplied closure returns `true`.
+    /// Backward-iterates over entries, calling the supplied closure for each entry.
+    ///
+    /// Stops iteration if the closure returns `true`.
     pub(crate) fn iter_backward<F: FnMut(&Self, Option<&Self>) -> bool>(
         head_entry_ptr: *const Self,
         mut f: F,
@@ -321,7 +325,7 @@ impl WaitQueue {
                 cx.waker().wake_by_ref();
             }
         } else {
-            // The waker is not set, so need to wake the task.
+            // The waker is not set, so we need to wake the task.
             cx.waker().wake_by_ref();
         }
 
@@ -372,20 +376,16 @@ impl WaitQueue {
                     park();
                 }
             } else {
-                // The thread is not set, so need to yield the thread.
+                // The thread is not set, so we need to yield the thread.
                 yield_now();
             }
         }
     }
 
-    /// The wait queue has been enqueued.
+    /// The wait queue entry has been enqueued.
     pub(crate) fn enqueued(&self) {
-        let Monitor::Async(_) = &self.monitor else {
-            // Synchronous wait queue entries do not need the flag to set.
-            return;
-        };
-        debug_assert_eq!(self.state.load(Relaxed) & Self::ENQUEUED, 0);
-        self.state.fetch_or(Self::ENQUEUED, Release);
+        debug_assert!(!self.enqueued.load(Relaxed));
+        self.enqueued.store(true, Release);
     }
 
     /// Returns `true` if the result has been finalized.
@@ -419,12 +419,16 @@ impl WaitQueue {
 impl Drop for WaitQueue {
     #[inline]
     fn drop(&mut self) {
-        let Monitor::Async(async_context) = &self.monitor else {
-            return;
-        };
         let state = self.state.load(Acquire);
-        if state & Self::ENQUEUED == Self::ENQUEUED && state & Self::RESULT_ACKED == 0 {
-            (async_context.drop_callback)(self);
+
+        // The wait queue entry was enqueued or had a result set but was not acknowledged.
+        //
+        // The wait queue entry owner will acquire the resource or has already acquired it without
+        // knowing it, therefore the resource needs to be released.
+        if (self.enqueued.load(Acquire) || state & Self::RESULT_SET == Self::RESULT_SET)
+            && state & Self::RESULT_ACKED == 0
+        {
+            (self.drop_callback)(self);
         }
     }
 }

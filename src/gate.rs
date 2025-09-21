@@ -30,7 +30,7 @@ pub struct Gate {
 /// [`Gate`] can be in one of three states.
 ///
 /// * `Controlled` - The default state where tasks can enter the [`Gate`] if permitted.
-/// * `Sealed` - The [`Gate`] is sealed and tasks immediately get rejected when attempting to enter.
+/// * `Sealed` - The [`Gate`] is sealed and tasks immediately get rejected when they attempt to enter.
 /// * `Open` - The [`Gate`] is open and tasks can immediately enter it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -43,7 +43,7 @@ pub enum State {
     Open = 2_u8,
 }
 
-/// Errors raised when accessing a [`Gate`].
+/// Errors that can occur when accessing a [`Gate`].
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum Error {
@@ -54,12 +54,12 @@ pub enum Error {
     /// Spurious failure to enter a [`Gate`] in a [`Controlled`](State::Controlled) state.
     ///
     /// This can happen if a task holding a [`Pager`] gets cancelled or drops the [`Pager`] before
-    /// the [`Gate`] has permitted or rejected the task; the task causes all the other waiting tasks
+    /// the [`Gate`] has permitted or rejected the task; the task causes all other waiting tasks
     /// of the [`Gate`] to get this error.
     SpuriousFailure = 12_u8,
     /// The [`Pager`] is not registered in any [`Gate`].
     NotRegistered = 16_u8,
-    /// The wrong asynchronous/synchronous mode was used in a [`Pager`].
+    /// The wrong asynchronous/synchronous mode was used for a [`Pager`].
     WrongMode = 20_u8,
     /// The result is not ready.
     NotReady = 24_u8,
@@ -168,7 +168,7 @@ impl Gate {
         }
     }
 
-    /// Rejects waiting tasks to enter the [`Gate`] if the [`Gate`] is in a
+    /// Rejects waiting tasks from entering the [`Gate`] if the [`Gate`] is in a
     /// [`Controlled`](State::Controlled) state.
     ///
     /// Returns the number of rejected tasks.
@@ -239,10 +239,10 @@ impl Gate {
         self.wake_all(Some(State::Open), None)
     }
 
-    /// Seals the [`Gate`] to disallow tasks to enter.
+    /// Seals the [`Gate`] to disallow tasks from entering.
     ///
     /// Returns the previous state of the [`Gate`] and the number of tasks that were waiting to
-    /// enter the gate.
+    /// enter the Gate.
     ///
     /// # Examples
     ///
@@ -298,7 +298,7 @@ impl Gate {
         pinned_pager.await
     }
 
-    /// Enters the [`Gate`] asynchronously with a wait callback provided.
+    /// Enters the [`Gate`] asynchronously with a wait callback.
     ///
     /// Returns the current state of the [`Gate`].
     ///
@@ -376,7 +376,7 @@ impl Gate {
         self.enter_sync_with(|| ())
     }
 
-    /// Enters the [`Gate`] synchronously with a wait callback provided.
+    /// Enters the [`Gate`] synchronously with a wait callback.
     ///
     /// Returns the current state of the [`Gate`].
     ///
@@ -426,10 +426,10 @@ impl Gate {
         pinned_pager.poll_sync()
     }
 
-    /// Registers a [`Pager`] to allow it get a permit to enter the [`Gate`] remotely.
+    /// Registers a [`Pager`] to allow it to get a permit to enter the [`Gate`] remotely.
     ///
-    /// `is_sync` indicates whether the [`Pager`] will be asynchronously (false), or synchronously
-    /// (true) polled.
+    /// `is_sync` indicates whether the [`Pager`] will be polled asynchronously (`false`) or
+    /// synchronously (`true`).
     ///
     /// Returns `false` if the [`Pager`] was already registered.
     ///
@@ -474,9 +474,9 @@ impl Gate {
         true
     }
 
-    /// Wakes up all the waiting tasks and updates the state.
+    /// Wakes up all waiting tasks and updates the state.
     ///
-    /// Returns `(prev_state, count)` where `prev_state` is the previous state of the gate and
+    /// Returns `(prev_state, count)` where `prev_state` is the previous state of the Gate and
     /// `count` is the number of tasks that were woken up.
     fn wake_all(&self, next_state: Option<State>, error: Option<Error>) -> (State, usize) {
         match self.state.fetch_update(AcqRel, Acquire, |value| {

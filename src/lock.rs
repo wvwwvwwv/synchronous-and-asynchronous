@@ -20,9 +20,9 @@ use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
 
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 ///
-/// The locking semantics is similar to [`RwLock`](std::sync::RwLock), however, [`Lock`] only
+/// The locking semantics are similar to [`RwLock`](std::sync::RwLock), however, [`Lock`] only
 /// provides low-level locking and releasing methods, hence forcing the user to manage the scope of
-/// acquired locks and resources to protect.
+/// acquired locks and the resources to protect.
 #[derive(Default)]
 pub struct Lock {
     /// [`Lock`] state.
@@ -45,10 +45,10 @@ impl Lock {
     /// Poisoned state.
     const POISONED_STATE: usize = WaitQueue::LOCKED_FLAG;
 
-    /// Acquired the desired lock.
+    /// Successfully acquired the desired lock.
     const ACQUIRED: u8 = 0_u8;
 
-    /// Could not acquire the desired lock.
+    /// Failed to acquire the desired lock.
     const NOT_ACQUIRED: u8 = 1_u8;
 
     /// Poisoned error code.
@@ -161,7 +161,7 @@ impl Lock {
             .await
     }
 
-    /// Acquires an exclusive lock asynchronously with a wait callback provided.
+    /// Acquires an exclusive lock asynchronously with a wait callback.
     ///
     /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
     /// waiting for a lock.
@@ -209,7 +209,7 @@ impl Lock {
         self.lock_sync_with(|| ())
     }
 
-    /// Acquires an exclusive lock synchronously with a wait callback provided.
+    /// Acquires an exclusive lock synchronously with a wait callback.
     ///
     /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
     /// waiting for a lock.
@@ -293,7 +293,7 @@ impl Lock {
             .await
     }
 
-    /// Acquires a shared lock asynchronously with a wait callback provided.
+    /// Acquires a shared lock asynchronously with a wait callback.
     ///
     /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
     /// waiting for a lock.
@@ -341,7 +341,7 @@ impl Lock {
         self.share_sync_with(|| ())
     }
 
-    /// Acquires a shared lock synchronously with a wait callback provided.
+    /// Acquires a shared lock synchronously with a wait callback.
     ///
     /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
     /// waiting for a lock.
@@ -382,7 +382,7 @@ impl Lock {
 
     /// Tries to acquire a shared lock.
     ///
-    /// Returns `false` if an exclusive lock was acquired, the number of shared owners has reached
+    /// Returns `false` if an exclusive lock is held, the number of shared owners has reached
     /// [`Self::MAX_SHARED_OWNERS`], or the lock is poisoned.
     ///
     /// # Examples
@@ -401,10 +401,10 @@ impl Lock {
         self.try_share_internal().0 == Self::ACQUIRED
     }
 
-    /// Registers a [`Pager`] to allow it get an exclusive lock or a shared lock remotely.
+    /// Registers a [`Pager`] to allow it to get an exclusive lock or a shared lock remotely.
     ///
-    /// `is_sync` indicates whether the [`Pager`] will be asynchronously (false), or synchronously
-    /// (true) polled.
+    /// `is_sync` indicates whether the [`Pager`] will be polled asynchronously (`false`) or
+    /// synchronously (`true`).
     ///
     /// Returns `false` if the [`Pager`] was already registered.
     ///
@@ -503,7 +503,7 @@ impl Lock {
 
     /// Poisons the lock with an exclusive lock held.
     ///
-    /// Returns `false` if an exclusive lock was not held, or the lock was already poisoned.
+    /// Returns `false` if an exclusive lock is not held, or the lock was already poisoned.
     ///
     /// # Examples
     ///
@@ -621,7 +621,7 @@ impl Lock {
             if state == Self::POISONED_STATE {
                 return (Self::POISONED, state);
             } else if state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0 {
-                // There is a waiting thread, and this should not acquire the lock.
+                // There is a waiting thread, so this thread should not acquire the lock.
                 return (Self::NOT_ACQUIRED, state);
             }
 
@@ -646,7 +646,7 @@ impl Lock {
         wait_queue: &WaitQueue,
         mut begin_wait: F,
     ) -> bool {
-        let pinned_async_wait = PinnedWaitQueue(Pin::new(wait_queue));
+        let pinned_entry = PinnedWaitQueue(Pin::new(wait_queue));
         loop {
             let (mut result, state) = if EXCLUSIVE {
                 self.try_lock_internal()
@@ -662,13 +662,13 @@ impl Lock {
             debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
             if let Some(returned) =
-                self.try_push_wait_queue_entry(pinned_async_wait.0, state, begin_wait)
+                self.try_push_wait_queue_entry(pinned_entry.0, state, begin_wait)
             {
                 begin_wait = returned;
                 continue;
             }
 
-            result = pinned_async_wait.await;
+            result = pinned_entry.await;
             debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
             return result == Self::ACQUIRED;
         }
@@ -710,7 +710,7 @@ impl Lock {
         loop {
             if state == Self::POISONED_STATE || state & WaitQueue::DATA_MASK != WaitQueue::DATA_MASK
             {
-                // Already poisoned or the lock is not held by the current thread.
+                // Already poisoned or the lock is not held exclusively by the current thread.
                 return false;
             }
             if state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
@@ -726,7 +726,7 @@ impl Lock {
             {
                 Ok(prev_state) => {
                     // A possible data race where the lock is being poisoned before the one that
-                    // woke up the current lock owner has finished processing the wate queue is
+                    // woke up the current lock owner has finished processing the wait queue is
                     // prevented by the wait queue processing method itself; `model.rs` proves it.
                     debug_assert_eq!(prev_state & WaitQueue::LOCKED_FLAG, 0);
                     let entry_addr = prev_state & WaitQueue::ADDR_MASK;
