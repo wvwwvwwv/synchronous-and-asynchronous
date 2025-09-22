@@ -3,7 +3,7 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release};
@@ -156,8 +156,8 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async(&self) -> bool {
-        let async_wait = WaitQueue::new(self, Opcode::Exclusive, false);
-        self.acquire_async_with_internal::<_, true>(&async_wait, || {})
+        let async_wait = pin!(WaitQueue::new(self, Opcode::Exclusive, false));
+        self.acquire_async_with_internal::<_, true>(async_wait, || {})
             .await
     }
 
@@ -182,8 +182,8 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
-        let async_wait = WaitQueue::new(self, Opcode::Exclusive, false);
-        self.acquire_async_with_internal::<_, true>(&async_wait, begin_wait)
+        let async_wait = pin!(WaitQueue::new(self, Opcode::Exclusive, false));
+        self.acquire_async_with_internal::<_, true>(async_wait, begin_wait)
             .await
     }
 
@@ -288,8 +288,8 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async(&self) -> bool {
-        let async_wait = WaitQueue::new(self, Opcode::Shared, false);
-        self.acquire_async_with_internal::<_, false>(&async_wait, || ())
+        let async_wait = pin!(WaitQueue::new(self, Opcode::Shared, false));
+        self.acquire_async_with_internal::<_, false>(async_wait, || ())
             .await
     }
 
@@ -314,8 +314,8 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
-        let async_wait = WaitQueue::new(self, Opcode::Shared, false);
-        self.acquire_async_with_internal::<_, false>(&async_wait, begin_wait)
+        let async_wait = pin!(WaitQueue::new(self, Opcode::Shared, false));
+        self.acquire_async_with_internal::<_, false>(async_wait, begin_wait)
             .await
     }
 
@@ -411,15 +411,14 @@ impl Lock {
     /// # Examples
     ///
     /// ```
-    /// use std::pin::Pin;
+    /// use std::pin::pin;
     ///
     /// use saa::{Lock, Pager};
     /// use saa::lock::Mode;
     ///
     /// let lock = Lock::default();
     ///
-    /// let mut pager = Pager::default();
-    /// let mut pinned_pager = Pin::new(&mut pager);
+    /// let mut pinned_pager = pin!(Pager::default());
     ///
     /// assert!(lock.register_pager(&mut pinned_pager, Mode::Exclusive, true));
     /// assert!(!lock.register_pager(&mut pinned_pager, Mode::Exclusive, true));
@@ -442,7 +441,7 @@ impl Lock {
         };
         pager.set_entry(WaitQueue::new(self, opcode, is_sync));
         loop {
-            let Some(entry) = pager.entry() else {
+            let Some(pinned_entry) = pager.entry() else {
                 continue;
             };
             let (result, state) = match mode {
@@ -450,11 +449,10 @@ impl Lock {
                 Mode::Shared => self.try_share_internal(),
             };
             if result == Self::ACQUIRED || result == Self::POISONED {
-                entry.set_result(result);
+                pinned_entry.set_result(result);
                 break;
             }
 
-            let pinned_entry = Pin::new(entry);
             if self
                 .try_push_wait_queue_entry(pinned_entry, state, || ())
                 .is_none()
@@ -643,10 +641,10 @@ impl Lock {
     #[inline]
     async fn acquire_async_with_internal<F: FnOnce(), const EXCLUSIVE: bool>(
         &self,
-        wait_queue: &WaitQueue,
+        pinned_entry: Pin<&mut WaitQueue>,
         mut begin_wait: F,
     ) -> bool {
-        let pinned_entry = PinnedWaitQueue(Pin::new(wait_queue));
+        let pinned_entry = PinnedWaitQueue(pinned_entry.as_ref());
         loop {
             let (mut result, state) = if EXCLUSIVE {
                 self.try_lock_internal()

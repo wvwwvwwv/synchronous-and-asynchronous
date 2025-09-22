@@ -2,6 +2,7 @@
 
 use std::cell::UnsafeCell;
 use std::future::Future;
+use std::marker::PhantomPinned;
 use std::mem::align_of;
 use std::pin::Pin;
 use std::ptr::{from_ref, null_mut, with_exposed_provenance};
@@ -44,9 +45,11 @@ pub(crate) struct WaitQueue {
     drop_callback: fn(&WaitQueue),
     /// Address of the corresponding synchronization primitive.
     addr: usize,
+    /// The [`WaitQueue`] cannot be unpinned since it forms an intrusive linked list.
+    _pinned: PhantomPinned,
 }
 
-/// Helper struct for pinning a [`WaitQueue`] to the stack and awaiting it.
+/// Helper struct for pinning a [`WaitQueue`] to the stack and awaiting it without consuming it.
 pub(crate) struct PinnedWaitQueue<'w>(pub(crate) Pin<&'w WaitQueue>);
 
 /// Contextual data for asynchronous [`WaitQueue`].
@@ -117,6 +120,7 @@ impl WaitQueue {
             monitor,
             drop_callback: S::drop_wait_queue_entry,
             addr: this.addr(),
+            _pinned: PhantomPinned,
         }
     }
 

@@ -1,8 +1,10 @@
+use std::pin::pin;
 use std::sync::Arc;
 use std::thread;
 
 use saa::gate::{Error, State};
-use saa::{Gate, Lock, Semaphore};
+use saa::lock::Mode;
+use saa::{Gate, Lock, Pager, Semaphore};
 
 #[test]
 fn lock() {
@@ -60,4 +62,20 @@ fn gate() {
 
     gate.seal();
     assert_eq!(gate.enter_sync(), Err(Error::Sealed));
+}
+
+#[test]
+fn pager() {
+    let lock = Lock::default();
+
+    let mut pinned_pager = pin!(Pager::default());
+    assert!(!pinned_pager.is_registered());
+
+    lock.lock_sync();
+    lock.register_pager(&mut pinned_pager, Mode::Shared, true);
+
+    assert!(pinned_pager.try_poll().is_err());
+
+    assert!(lock.release_lock());
+    assert!(pinned_pager.poll_sync().is_ok());
 }

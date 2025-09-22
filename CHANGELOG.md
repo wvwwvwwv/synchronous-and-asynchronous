@@ -1,5 +1,9 @@
 # Changelog
 
+4.1.0
+
+* API update for the `Pager` API: `Pager` is now explicitly `!Unpin`, and `poll_async` replaces direct `await` calls.
+
 4.0.0
 
 * Add the `Pager` API for all synchronization primitives.

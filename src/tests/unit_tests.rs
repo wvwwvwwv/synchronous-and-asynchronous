@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::pin::pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Barrier};
@@ -462,11 +462,10 @@ async fn lock_pager() {
         let lock = lock.clone();
         if i % 2 == 0 {
             tasks.push(tokio::spawn(async move {
-                let mut pager = Pager::default();
+                let mut pinned_pager = pin!(Pager::default());
                 for _ in 0..num_iters {
-                    let mut pinned_pager = Pin::new(&mut pager);
                     lock.register_pager(&mut pinned_pager, lock::Mode::Shared, false);
-                    match pinned_pager.await {
+                    match pinned_pager.poll_async().await {
                         Ok(true) => {
                             check.fetch_add(1, Relaxed);
                             lock.release_share();
@@ -477,9 +476,8 @@ async fn lock_pager() {
             }));
         } else {
             threads.push(thread::spawn(move || {
-                let mut pager = Pager::default();
+                let mut pinned_pager = pin!(Pager::default());
                 for _ in 0..num_iters {
-                    let mut pinned_pager = Pin::new(&mut pager);
                     lock.register_pager(&mut pinned_pager, lock::Mode::Exclusive, true);
                     match pinned_pager.poll_sync() {
                         Ok(true) => {
@@ -684,12 +682,11 @@ async fn semaphore_pager() {
         let semaphore = semaphore.clone();
         if i % 2 == 0 {
             tasks.push(tokio::spawn(async move {
-                let mut pager = Pager::default();
+                let mut pinned_pager = pin!(Pager::default());
                 for _ in 0..num_iters {
-                    let mut pinned_pager = Pin::new(&mut pager);
                     assert!(!semaphore.register_pager(&mut pinned_pager, usize::MAX, false));
                     semaphore.register_pager(&mut pinned_pager, Semaphore::MAX_PERMITS, false);
-                    match pinned_pager.await {
+                    match pinned_pager.poll_async().await {
                         Ok(()) => {
                             check.fetch_add(1, Relaxed);
                             semaphore.release_many(Semaphore::MAX_PERMITS);
@@ -700,9 +697,8 @@ async fn semaphore_pager() {
             }));
         } else {
             threads.push(thread::spawn(move || {
-                let mut pager = Pager::default();
+                let mut pinned_pager = pin!(Pager::default());
                 for _ in 0..num_iters {
-                    let mut pinned_pager = Pin::new(&mut pager);
                     assert!(!semaphore.register_pager(&mut pinned_pager, usize::MAX, true));
                     semaphore.register_pager(&mut pinned_pager, Semaphore::MAX_PERMITS, true);
                     match pinned_pager.poll_sync() {
@@ -814,11 +810,10 @@ async fn gate_pager() {
         let gate = gate.clone();
         if i % 2 == 0 {
             tasks.push(tokio::spawn(async move {
-                let mut pager = Pager::default();
+                let mut pinned_pager = pin!(Pager::default());
                 for _ in 0..num_iters {
-                    let mut pinned_pager = Pin::new(&mut pager);
                     gate.register_pager(&mut pinned_pager, false);
-                    match pinned_pager.await {
+                    match pinned_pager.poll_async().await {
                         Ok(_) => {
                             check.fetch_add(1, Relaxed);
                         }
@@ -828,9 +823,8 @@ async fn gate_pager() {
             }));
         } else {
             threads.push(thread::spawn(move || {
-                let mut pager = Pager::default();
+                let mut pinned_pager = pin!(Pager::default());
                 for _ in 0..num_iters {
-                    let mut pinned_pager = Pin::new(&mut pager);
                     gate.register_pager(&mut pinned_pager, true);
                     match pinned_pager.poll_sync() {
                         Ok(_) => {
@@ -880,8 +874,7 @@ fn pager_drop_implicit() {
     }
 
     for is_sync in [false, true] {
-        let mut pager = Pager::default();
-        let mut pinned_pager = Pin::new(&mut pager);
+        let mut pinned_pager = pin!(Pager::default());
         lock.register_pager(&mut pinned_pager, lock::Mode::Exclusive, is_sync);
     }
 
@@ -906,8 +899,7 @@ fn pager_drop_explicit() {
     });
 
     {
-        let mut pager = Pager::default();
-        let mut pinned_pager = Pin::new(&mut pager);
+        let mut pinned_pager = pin!(Pager::default());
         assert!(semaphore.register_pager(&mut pinned_pager, 11, false));
     }
 
@@ -951,8 +943,7 @@ async fn lock_chaos() {
                 for j in 0..num_iters {
                     assert!(!lock.is_poisoned(Relaxed));
                     if j % 7 == 3 {
-                        let mut pager = Pager::default();
-                        let mut pinned_pager = Pin::new(&mut pager);
+                        let mut pinned_pager = pin!(Pager::default());
                         lock.register_pager(&mut pinned_pager, lock::Mode::Exclusive, j % 2 == 0);
                     } else if j % 11 == 0 {
                         assert!(lock.lock_sync());
@@ -1008,8 +999,7 @@ async fn semaphore_chaos() {
             threads.push(thread::spawn(move || {
                 for j in 0..num_iters {
                     if j % 7 == 1 {
-                        let mut pager = Pager::default();
-                        let mut pinned_pager = Pin::new(&mut pager);
+                        let mut pinned_pager = pin!(Pager::default());
                         assert!(semaphore.register_pager(&mut pinned_pager, 27, j % 2 == 0));
                     } else {
                         assert!(semaphore.acquire_many_sync(i + 1));
@@ -1063,8 +1053,7 @@ async fn gate_chaos() {
             threads.push(thread::spawn(move || {
                 for j in 0..num_iters {
                     if j % 7 == 5 {
-                        let mut pager = Pager::default();
-                        let mut pinned_pager = Pin::new(&mut pager);
+                        let mut pinned_pager = pin!(Pager::default());
                         if i % 3 == 0 {
                             assert!(gate.register_pager(&mut pinned_pager, false));
                         } else {

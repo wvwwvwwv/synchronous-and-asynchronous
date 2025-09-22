@@ -3,7 +3,7 @@
 
 #![deny(unsafe_code)]
 
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed};
@@ -291,11 +291,10 @@ impl Gate {
     /// ```
     #[inline]
     pub async fn enter_async(&self) -> Result<State, Error> {
-        let mut pager = Pager::default();
-        pager.set_entry(WaitQueue::new(self, Opcode::Wait, false));
-        let mut pinned_pager = Pin::new(&mut pager);
+        let mut pinned_pager = pin!(Pager::default());
+        pinned_pager.set_entry(WaitQueue::new(self, Opcode::Wait, false));
         self.push_wait_queue_entry(&mut pinned_pager, || {});
-        pinned_pager.await
+        pinned_pager.poll_async().await
     }
 
     /// Enters the [`Gate`] asynchronously with a wait callback.
@@ -325,11 +324,10 @@ impl Gate {
     /// ```
     #[inline]
     pub async fn enter_async_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
-        let mut pager = Pager::default();
-        pager.set_entry(WaitQueue::new(self, Opcode::Wait, false));
-        let mut pinned_pager = Pin::new(&mut pager);
+        let mut pinned_pager = pin!(Pager::default());
+        pinned_pager.set_entry(WaitQueue::new(self, Opcode::Wait, false));
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
-        pinned_pager.await
+        pinned_pager.poll_async().await
     }
 
     /// Enters the [`Gate`] synchronously.
@@ -419,9 +417,8 @@ impl Gate {
     /// ```
     #[inline]
     pub fn enter_sync_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
-        let mut pager = Pager::default();
-        pager.set_entry(WaitQueue::new(self, Opcode::Wait, true));
-        let mut pinned_pager = Pin::new(&mut pager);
+        let mut pinned_pager = pin!(Pager::default());
+        pinned_pager.set_entry(WaitQueue::new(self, Opcode::Wait, true));
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_sync()
     }
@@ -436,7 +433,7 @@ impl Gate {
     /// # Examples
     ///
     /// ```
-    /// use std::pin::Pin;
+    /// use std::pin::pin;
     /// use std::sync::Arc;
     /// use std::thread;
     ///
@@ -445,8 +442,7 @@ impl Gate {
     ///
     /// let gate = Arc::new(Gate::default());
     ///
-    /// let mut pager = Pager::default();
-    /// let mut pinned_pager = Pin::new(&mut pager);
+    /// let mut pinned_pager = pin!(Pager::default());
     ///
     /// assert!(gate.register_pager(&mut pinned_pager, true));
     /// assert!(!gate.register_pager(&mut pinned_pager, true));
@@ -515,8 +511,7 @@ impl Gate {
         pager: &mut Pin<&mut Pager<Self>>,
         mut wait_callback: F,
     ) {
-        if let Some(entry) = pager.entry() {
-            let pinned_entry = Pin::new(entry);
+        if let Some(pinned_entry) = pager.entry() {
             loop {
                 let state = self.state.load(Acquire);
                 match State::from(state & WaitQueue::DATA_MASK) {
@@ -529,10 +524,10 @@ impl Gate {
                         }
                     }
                     State::Sealed => {
-                        entry.set_result(Self::into_u8(State::Sealed, Some(Error::Sealed)));
+                        pinned_entry.set_result(Self::into_u8(State::Sealed, Some(Error::Sealed)));
                     }
                     State::Open => {
-                        entry.set_result(Self::into_u8(State::Open, None));
+                        pinned_entry.set_result(Self::into_u8(State::Open, None));
                     }
                 }
                 break;

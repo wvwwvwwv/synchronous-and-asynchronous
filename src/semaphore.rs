@@ -4,7 +4,7 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
@@ -138,9 +138,8 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async(&self) {
-        let async_wait = WaitQueue::new(self, Opcode::Semaphore(1), false);
-        self.acquire_async_with_internal(&async_wait, 1, || {})
-            .await;
+        let async_wait = pin!(WaitQueue::new(self, Opcode::Semaphore(1), false));
+        self.acquire_async_with_internal(async_wait, 1, || {}).await;
     }
 
     /// Gets a permit from the semaphore asynchronously with a wait callback.
@@ -164,8 +163,8 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async_with<F: FnOnce()>(&self, begin_wait: F) {
-        let async_wait = WaitQueue::new(self, Opcode::Semaphore(1), false);
-        self.acquire_async_with_internal(&async_wait, 1, begin_wait)
+        let async_wait = pin!(WaitQueue::new(self, Opcode::Semaphore(1), false));
+        self.acquire_async_with_internal(async_wait, 1, begin_wait)
             .await;
     }
 
@@ -248,8 +247,8 @@ impl Semaphore {
     #[inline]
     pub async fn acquire_many_async(&self, count: usize) -> bool {
         #[allow(clippy::cast_possible_truncation)]
-        let async_wait = WaitQueue::new(self, Opcode::Semaphore(count as u8), false);
-        self.acquire_async_with_internal(&async_wait, count, || {})
+        let async_wait = pin!(WaitQueue::new(self, Opcode::Semaphore(count as u8), false));
+        self.acquire_async_with_internal(async_wait, count, || {})
             .await
     }
 
@@ -276,8 +275,8 @@ impl Semaphore {
     #[inline]
     pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) -> bool {
         #[allow(clippy::cast_possible_truncation)]
-        let async_wait = WaitQueue::new(self, Opcode::Semaphore(count as u8), false);
-        self.acquire_async_with_internal(&async_wait, count, begin_wait)
+        let async_wait = pin!(WaitQueue::new(self, Opcode::Semaphore(count as u8), false));
+        self.acquire_async_with_internal(async_wait, count, begin_wait)
             .await
     }
 
@@ -379,14 +378,13 @@ impl Semaphore {
     /// # Examples
     ///
     /// ```
-    /// use std::pin::Pin;
+    /// use std::pin::pin;
     ///
     /// use saa::{Pager, Semaphore};
     ///
     /// let semaphore = Semaphore::default();
     ///
-    /// let mut pager = Pager::default();
-    /// let mut pinned_pager = Pin::new(&mut pager);
+    /// let mut pinned_pager = pin!(Pager::default());
     ///
     /// assert!(semaphore.register_pager(&mut pinned_pager, 1, true));
     /// assert!(!semaphore.register_pager(&mut pinned_pager, 1, true));
@@ -409,16 +407,15 @@ impl Semaphore {
 
         pager.set_entry(WaitQueue::new(self, Opcode::Semaphore(count), is_sync));
         loop {
-            let Some(entry) = pager.entry() else {
+            let Some(pinned_entry) = pager.entry() else {
                 continue;
             };
             let (result, state) = self.try_acquire_internal(count);
             if result {
-                entry.set_result(0);
+                pinned_entry.set_result(0);
                 break;
             }
 
-            let pinned_entry = Pin::new(entry);
             if self
                 .try_push_wait_queue_entry(pinned_entry, state, || ())
                 .is_none()
@@ -491,7 +488,7 @@ impl Semaphore {
     #[inline]
     async fn acquire_async_with_internal<F: FnOnce()>(
         &self,
-        wait_queue: &WaitQueue,
+        pinned_entry: Pin<&mut WaitQueue>,
         count: usize,
         mut begin_wait: F,
     ) -> bool {
@@ -501,7 +498,7 @@ impl Semaphore {
         let Ok(count) = u8::try_from(count) else {
             return false;
         };
-        let pinned_entry = PinnedWaitQueue(Pin::new(wait_queue));
+        let pinned_entry = PinnedWaitQueue(pinned_entry.as_ref());
         loop {
             let (result, state) = self.try_acquire_internal(count);
             if result {

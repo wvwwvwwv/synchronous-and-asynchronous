@@ -1,6 +1,6 @@
 //! Define base operations for synchronization primitives.
 
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::ptr::{addr_of, null};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
@@ -66,11 +66,10 @@ pub(crate) trait SyncPrimitive: Sized {
     ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
-        let entry = WaitQueue::new(self, mode, true);
-        let pinned_entry = Pin::new(&entry);
-        debug_assert_eq!(addr_of!(entry), WaitQueue::ref_to_ptr(&pinned_entry));
-
-        if let Some(returned) = self.try_push_wait_queue_entry(pinned_entry, state, begin_wait) {
+        let pinned_entry = pin!(WaitQueue::new(self, mode, true));
+        if let Some(returned) =
+            self.try_push_wait_queue_entry(pinned_entry.as_ref(), state, begin_wait)
+        {
             return Err(returned);
         }
         Ok(pinned_entry.poll_result_sync())

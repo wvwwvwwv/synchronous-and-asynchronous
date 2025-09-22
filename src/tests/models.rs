@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -192,8 +192,7 @@ fn drop_future() {
             semaphore_clone.acquire_many_sync(9);
         });
         {
-            let mut pager = Pager::default();
-            let mut pinned_pager = Pin::new(&mut pager);
+            let mut pinned_pager = pin!(Pager::default());
             assert!(semaphore.register_pager(&mut pinned_pager, 11, false));
         }
 

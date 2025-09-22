@@ -101,20 +101,19 @@ for thread in threads {
 
 ## Pager
 
-`saa::Pager` allows to remotely wait for a resource to become available.
+`saa::Pager` enables remotely waiting for a resource to become available.
 
 ### Examples
 
 ```rust
-use std::pin::Pin;
+use std::pin::pin;
 
 use saa::{Gate, Pager};
 use saa::gate::State;
 
 let gate = Gate::default();
 
-let mut pager = Pager::default();
-let mut pinned_pager = Pin::new(&mut pager);
+let mut pinned_pager = pin!(Pager::default());
 
 assert!(gate.register_pager(&mut pinned_pager, true));
 assert_eq!(gate.open().1, 1);
