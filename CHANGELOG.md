@@ -1,5 +1,9 @@
 # Changelog
 
+4.3.1
+
+* Fix a bug in `Pager::try_poll`.
+
 4.3.0
 
 * Remove `Pager::is_sync`.

@@ -94,10 +94,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     #[inline]
     pub async fn poll_async(self: &mut Pin<&mut Pager<'s, S>>) -> S::Result {
         if !self.is_registered() {
-            let Some(result) = self.wait_queue().entry().try_acknowledge_result() else {
-                return S::to_result(0, Some(Error::NotRegistered));
-            };
-            return S::to_result(result, None);
+            return S::to_result(0, Some(Error::NotRegistered));
         }
         let wait_queue = self.wait_queue();
         let pinned_entry = PinnedEntry(Pin::new(wait_queue.entry()));
@@ -131,10 +128,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     #[inline]
     pub fn poll_sync(self: &mut Pin<&mut Pager<'s, S>>) -> S::Result {
         if !self.is_registered() {
-            let Some(result) = self.wait_queue().entry().try_acknowledge_result() else {
-                return S::to_result(0, Some(Error::NotRegistered));
-            };
-            return S::to_result(result, None);
+            return S::to_result(0, Some(Error::NotRegistered));
         }
         let result = self.wait_queue().entry().poll_result_sync();
         if result == Entry::ERROR_WRONG_MODE {
@@ -157,6 +151,8 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     ///
     /// let mut pinned_pager = pin!(Pager::default());
     ///
+    /// assert_eq!(pinned_pager.try_poll(), Err(Error::NotRegistered));
+    ///
     /// assert!(gate.register_pager(&mut pinned_pager, true));
     ///
     /// assert_eq!(pinned_pager.try_poll(), Err(Error::NotReady));
@@ -167,10 +163,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     #[inline]
     pub fn try_poll(self: &mut Pin<&mut Pager<'s, S>>) -> S::Result {
         if !self.is_registered() {
-            let Some(result) = self.wait_queue().entry().try_acknowledge_result() else {
-                return S::to_result(0, Some(Error::NotRegistered));
-            };
-            return S::to_result(result, None);
+            return S::to_result(0, Some(Error::NotRegistered));
         }
         if let Some(result) = self.wait_queue().entry().try_acknowledge_result() {
             S::to_result(result, None)
