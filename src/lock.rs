@@ -440,18 +440,15 @@ impl Lock {
         mode: Mode,
         is_sync: bool,
     ) -> bool {
-        if pager.wait_queue().is_some() {
+        if pager.is_registered() {
             return false;
         }
         let opcode = match mode {
             Mode::Exclusive => Opcode::Exclusive,
             Mode::Shared => Opcode::Shared,
         };
-        pager.set_wait_queue();
-        let Some(wait_queue) = pager.wait_queue() else {
-            return false;
-        };
-        wait_queue.construct(self, opcode, is_sync);
+
+        pager.wait_queue().construct(self, opcode, is_sync);
 
         loop {
             let (result, state) = match mode {
@@ -459,12 +456,12 @@ impl Lock {
                 Mode::Shared => self.try_share_internal(),
             };
             if result == Self::ACQUIRED || result == Self::POISONED {
-                wait_queue.entry().set_result(result);
+                pager.wait_queue().entry().set_result(result);
                 break;
             }
 
             if self
-                .try_push_wait_queue_entry(wait_queue, state, || ())
+                .try_push_wait_queue_entry(pager.wait_queue(), state, || ())
                 .is_none()
             {
                 break;

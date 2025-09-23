@@ -292,11 +292,9 @@ impl Gate {
     #[inline]
     pub async fn enter_async(&self) -> Result<State, Error> {
         let mut pinned_pager = pin!(Pager::default());
-        pinned_pager.set_wait_queue();
-        let Some(wait_queue) = pinned_pager.wait_queue() else {
-            return Err(Error::NotRegistered);
-        };
-        wait_queue.construct(self, Opcode::Wait, false);
+        pinned_pager
+            .wait_queue()
+            .construct(self, Opcode::Wait, false);
         self.push_wait_queue_entry(&mut pinned_pager, || {});
         pinned_pager.poll_async().await
     }
@@ -329,11 +327,9 @@ impl Gate {
     #[inline]
     pub async fn enter_async_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
         let mut pinned_pager = pin!(Pager::default());
-        pinned_pager.set_wait_queue();
-        let Some(wait_queue) = pinned_pager.wait_queue() else {
-            return Err(Error::NotRegistered);
-        };
-        wait_queue.construct(self, Opcode::Wait, false);
+        pinned_pager
+            .wait_queue()
+            .construct(self, Opcode::Wait, false);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_async().await
     }
@@ -426,11 +422,9 @@ impl Gate {
     #[inline]
     pub fn enter_sync_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
         let mut pinned_pager = pin!(Pager::default());
-        pinned_pager.set_wait_queue();
-        let Some(wait_queue) = pinned_pager.wait_queue() else {
-            return Err(Error::NotRegistered);
-        };
-        wait_queue.construct(self, Opcode::Wait, true);
+        pinned_pager
+            .wait_queue()
+            .construct(self, Opcode::Wait, true);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_sync()
     }
@@ -474,14 +468,10 @@ impl Gate {
         pager: &mut Pin<&mut Pager<'g, Self>>,
         is_sync: bool,
     ) -> bool {
-        if pager.wait_queue().is_some() {
+        if pager.is_registered() {
             return false;
         }
-        pager.set_wait_queue();
-        let Some(wait_queue) = pager.wait_queue() else {
-            return false;
-        };
-        wait_queue.construct(self, Opcode::Wait, is_sync);
+        pager.wait_queue().construct(self, Opcode::Wait, is_sync);
         self.push_wait_queue_entry(pager, || ());
         true
     }
@@ -524,31 +514,31 @@ impl Gate {
         pager: &mut Pin<&mut Pager<Self>>,
         mut wait_callback: F,
     ) {
-        if let Some(wait_queue) = pager.wait_queue() {
-            loop {
-                let state = self.state.load(Acquire);
-                match State::from(state & WaitQueue::DATA_MASK) {
-                    State::Controlled => {
-                        if let Some(returned) =
-                            self.try_push_wait_queue_entry(wait_queue, state, wait_callback)
-                        {
-                            wait_callback = returned;
-                            continue;
-                        }
-                    }
-                    State::Sealed => {
-                        wait_queue
-                            .entry()
-                            .set_result(Self::into_u8(State::Sealed, Some(Error::Sealed)));
-                    }
-                    State::Open => {
-                        wait_queue
-                            .entry()
-                            .set_result(Self::into_u8(State::Open, None));
+        loop {
+            let state = self.state.load(Acquire);
+            match State::from(state & WaitQueue::DATA_MASK) {
+                State::Controlled => {
+                    if let Some(returned) =
+                        self.try_push_wait_queue_entry(pager.wait_queue(), state, wait_callback)
+                    {
+                        wait_callback = returned;
+                        continue;
                     }
                 }
-                break;
+                State::Sealed => {
+                    pager
+                        .wait_queue()
+                        .entry()
+                        .set_result(Self::into_u8(State::Sealed, Some(Error::Sealed)));
+                }
+                State::Open => {
+                    pager
+                        .wait_queue()
+                        .entry()
+                        .set_result(Self::into_u8(State::Open, None));
+                }
             }
+            break;
         }
     }
 

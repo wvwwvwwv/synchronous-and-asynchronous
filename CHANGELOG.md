@@ -1,5 +1,11 @@
 # Changelog
 
+4.3.0
+
+* Remove `Pager::is_sync`.
+* All `Pager` methods need a pinned reference.
+* `Pager::poll*` methods return the result only once, and further calls without registering it will return an error.
+
 4.2.0
 
 * Remove the 128B alignment requirement for `WaitQueue`.

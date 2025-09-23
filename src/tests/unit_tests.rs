@@ -9,7 +9,7 @@ use crate::{Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
-    let limit = 224;
+    let limit = 220;
     let lock = Lock::default();
 
     let lock_fut = &lock.lock_async();
@@ -1045,8 +1045,11 @@ async fn gate_chaos() {
                             assert!(gate.register_pager(&mut pinned_pager, false));
                         } else {
                             assert!(gate.register_pager(&mut pinned_pager, true));
-                            if let Ok(state) = pinned_pager.try_poll() {
-                                assert_eq!(pinned_pager.poll_sync(), Ok(state));
+                            if pinned_pager.try_poll().is_ok() {
+                                assert_eq!(
+                                    pinned_pager.poll_sync(),
+                                    Err(gate::Error::NotRegistered)
+                                );
                             }
                         }
                     } else {

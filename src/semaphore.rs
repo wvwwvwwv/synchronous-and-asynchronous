@@ -410,27 +410,26 @@ impl Semaphore {
         count: usize,
         is_sync: bool,
     ) -> bool {
-        if pager.wait_queue().is_some() || count > Self::MAX_PERMITS {
+        if count > Self::MAX_PERMITS || pager.is_registered() {
             return false;
         }
         let Ok(count) = u8::try_from(count) else {
             return false;
         };
 
-        pager.set_wait_queue();
-        let Some(wait_queue) = pager.wait_queue() else {
-            return false;
-        };
-        wait_queue.construct(self, Opcode::Semaphore(count), is_sync);
+        pager
+            .wait_queue()
+            .construct(self, Opcode::Semaphore(count), is_sync);
+
         loop {
             let (result, state) = self.try_acquire_internal(count);
             if result {
-                wait_queue.entry().set_result(0);
+                pager.wait_queue().entry().set_result(0);
                 break;
             }
 
             if self
-                .try_push_wait_queue_entry(wait_queue, state, || ())
+                .try_push_wait_queue_entry(pager.wait_queue(), state, || ())
                 .is_none()
             {
                 break;

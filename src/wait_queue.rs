@@ -114,6 +114,13 @@ impl WaitQueue {
     /// Mask to extract the memory address part from a `usize` value.
     pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
 
+    /// Static assertions.
+    const _ASSERT: () = {
+        assert!(align_of::<WaitQueue>() == 8);
+        assert!(align_of::<Entry>() == 8);
+        assert!(size_of::<Entry>() <= Self::VIRTUAL_ALIGNMENT / 2);
+    };
+
     /// Creates a new [`WaitQueue`].
     pub(crate) fn construct<S: SyncPrimitive>(
         self: Pin<&Self>,
@@ -121,16 +128,18 @@ impl WaitQueue {
         opcode: Opcode,
         is_sync: bool,
     ) {
-        debug_assert_eq!(align_of::<WaitQueue>(), 8);
-        debug_assert_eq!(align_of::<Entry>(), 8);
-        debug_assert!(size_of::<Entry>() <= Self::VIRTUAL_ALIGNMENT / 2);
-
         let (anchor_ptr, offset) = self.anchor_ptr();
-        unsafe {
+        let had_entry = unsafe {
             // `0` represents the initial state, therefore take the compliment of the offset.
-            *anchor_ptr.cast_mut() = u64::MAX - u64::try_from(offset).unwrap_or(0);
-        }
-        let entry_ptr = Self::to_entry_ptr(anchor_ptr);
+            if *anchor_ptr == 0 {
+                *anchor_ptr.cast_mut() = u64::MAX - u64::try_from(offset).unwrap_or(0);
+                false
+            } else {
+                debug_assert_eq!(*anchor_ptr, u64::MAX - u64::try_from(offset).unwrap_or(0));
+                true
+            }
+        };
+        let entry_ptr = Self::to_entry_ptr(anchor_ptr).cast_mut();
         let monitor = if is_sync {
             Monitor::Sync(SyncContext {
                 thread: UnsafeCell::new(None),
@@ -140,23 +149,47 @@ impl WaitQueue {
                 waker: UnsafeCell::new(None),
             })
         };
-        let entry = Entry {
-            next_entry_anchor_ptr: AtomicPtr::new(null_mut()),
-            prev_entry_ptr: AtomicPtr::new(null_mut()),
-            opcode,
-            state: AtomicU16::new(0),
-            enqueued: std::sync::atomic::AtomicBool::new(false),
-            monitor,
-            drop_callback: S::drop_wait_queue_entry,
-            addr: sync_primitive.addr(),
-            offset: u16::try_from(
-                entry_ptr.expose_provenance() - self.raw_data.get().expose_provenance(),
-            )
-            .unwrap_or(0),
-        };
         unsafe {
-            entry_ptr.cast_mut().write(entry);
+            if had_entry {
+                (*entry_ptr).prev_entry_ptr.store(null_mut(), Relaxed);
+                (*entry_ptr).opcode = opcode;
+                (*entry_ptr).monitor = monitor;
+                (*entry_ptr).addr = sync_primitive.addr();
+            } else {
+                let entry = Entry {
+                    next_entry_anchor_ptr: AtomicPtr::new(null_mut()),
+                    prev_entry_ptr: AtomicPtr::new(null_mut()),
+                    opcode,
+                    state: AtomicU16::new(0),
+                    enqueued: std::sync::atomic::AtomicBool::new(false),
+                    monitor,
+                    drop_callback: S::drop_wait_queue_entry,
+                    addr: sync_primitive.addr(),
+                    offset: u16::try_from(
+                        entry_ptr.expose_provenance() - self.raw_data.get().expose_provenance(),
+                    )
+                    .unwrap_or(0),
+                };
+                entry_ptr.write(entry);
+            }
         }
+    }
+
+    /// Checks whether the wait queue entry has been enqueued.
+    #[inline]
+    pub(crate) fn is_enqueued(&self) -> bool {
+        let entry_ptr = Self::to_entry_ptr(self.anchor_ptr().0);
+        if entry_ptr.is_null() {
+            false
+        } else {
+            unsafe { (*entry_ptr).enqueued.load(Acquire) }
+        }
+    }
+
+    /// Gets a pinned reference.
+    #[inline]
+    pub(crate) fn pinned_wait_queue<'l>(wait_queue_ptr: *const WaitQueue) -> Pin<&'l WaitQueue> {
+        unsafe { Pin::new_unchecked(&*wait_queue_ptr) }
     }
 
     /// Returns a reference to the entry.
@@ -267,9 +300,6 @@ impl Entry {
 
     /// Indicates that a result is finalized.
     const RESULT_FINALIZED: u16 = 1_u16 << (u8::BITS + 2);
-
-    /// Indicates that a result is acknowledged.
-    const RESULT_ACKED: u16 = 1_u16 << (u8::BITS + 3);
 
     /// Returns the anchor pointer derived from the entry pointer.
     #[inline]
@@ -407,14 +437,9 @@ impl Entry {
         }
     }
 
-    /// Returns `true` if it contains a synchronous context.
-    #[inline]
-    pub(crate) fn is_sync(&self) -> bool {
-        matches!(self.monitor, Monitor::Sync(_))
-    }
-
     /// Sets the result to the entry.
     pub(crate) fn set_result(&self, result: u8) {
+        self.enqueued.store(true, Release);
         let mut state = self.state.load(Acquire);
         loop {
             debug_assert_eq!(state & Self::RESULT_SET, 0);
@@ -557,8 +582,7 @@ impl Entry {
 
     /// The wait queue entry has been enqueued.
     #[inline]
-    pub(crate) fn enqueued(&self) {
-        debug_assert!(!self.enqueued.load(Relaxed));
+    pub(crate) fn set_enqueued(&self) {
         self.enqueued.store(true, Release);
     }
 
@@ -586,7 +610,8 @@ impl Entry {
         let state = self.state.load(Acquire);
         if state & Self::RESULT_FINALIZED == Self::RESULT_FINALIZED {
             debug_assert_ne!(state & Self::RESULT_SET, 0);
-            self.state.fetch_or(Self::RESULT_ACKED, Release);
+            self.state.store(0, Release);
+            self.enqueued.store(false, Release);
             return u8::try_from(state & ((1_u16 << u8::BITS) - 1)).ok();
         }
         None
@@ -599,14 +624,11 @@ impl Entry {
     #[inline]
     fn prepare_drop(entry_ptr: *mut Self) {
         let this = unsafe { &mut *entry_ptr };
-        let state = this.state.load(Acquire);
-        // The wait queue entry was enqueued or had a result set but was not acknowledged.
+        // The wait queue entry is still in the wait queue.
         //
         // The wait queue entry owner will acquire the resource or has already acquired it without
         // knowing it, therefore the resource needs to be released.
-        if (this.enqueued.load(Acquire) || state & Self::RESULT_SET == Self::RESULT_SET)
-            && state & Self::RESULT_ACKED == 0
-        {
+        if this.enqueued.load(Acquire) {
             (this.drop_callback)(this);
             this.enqueued.store(false, Release);
         }
