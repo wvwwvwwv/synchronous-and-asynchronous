@@ -16,7 +16,7 @@ use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
-use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
+use crate::wait_queue::{Entry, PinnedEntry, WaitQueue};
 
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 ///
@@ -156,7 +156,10 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async(&self) -> bool {
-        let async_wait = pin!(WaitQueue::new(self, Opcode::Exclusive, false));
+        let async_wait = pin!(WaitQueue::default());
+        async_wait
+            .as_ref()
+            .construct(self, Opcode::Exclusive, false);
         self.acquire_async_with_internal::<_, true>(async_wait, || {})
             .await
     }
@@ -182,7 +185,10 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
-        let async_wait = pin!(WaitQueue::new(self, Opcode::Exclusive, false));
+        let async_wait = pin!(WaitQueue::default());
+        async_wait
+            .as_ref()
+            .construct(self, Opcode::Exclusive, false);
         self.acquire_async_with_internal::<_, true>(async_wait, begin_wait)
             .await
     }
@@ -288,7 +294,8 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async(&self) -> bool {
-        let async_wait = pin!(WaitQueue::new(self, Opcode::Shared, false));
+        let async_wait = pin!(WaitQueue::default());
+        async_wait.as_ref().construct(self, Opcode::Shared, false);
         self.acquire_async_with_internal::<_, false>(async_wait, || ())
             .await
     }
@@ -314,7 +321,8 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
-        let async_wait = pin!(WaitQueue::new(self, Opcode::Shared, false));
+        let async_wait = pin!(WaitQueue::default());
+        async_wait.as_ref().construct(self, Opcode::Shared, false);
         self.acquire_async_with_internal::<_, false>(async_wait, begin_wait)
             .await
     }
@@ -432,29 +440,31 @@ impl Lock {
         mode: Mode,
         is_sync: bool,
     ) -> bool {
-        if pager.entry().is_some() {
+        if pager.wait_queue().is_some() {
             return false;
         }
         let opcode = match mode {
             Mode::Exclusive => Opcode::Exclusive,
             Mode::Shared => Opcode::Shared,
         };
-        pager.set_entry(WaitQueue::new(self, opcode, is_sync));
+        pager.set_wait_queue();
+        let Some(wait_queue) = pager.wait_queue() else {
+            return false;
+        };
+        wait_queue.construct(self, opcode, is_sync);
+
         loop {
-            let Some(pinned_entry) = pager.entry() else {
-                continue;
-            };
             let (result, state) = match mode {
                 Mode::Exclusive => self.try_lock_internal(),
                 Mode::Shared => self.try_share_internal(),
             };
             if result == Self::ACQUIRED || result == Self::POISONED {
-                pinned_entry.set_result(result);
+                wait_queue.entry().set_result(result);
                 break;
             }
 
             if self
-                .try_push_wait_queue_entry(pinned_entry, state, || ())
+                .try_push_wait_queue_entry(wait_queue, state, || ())
                 .is_none()
             {
                 break;
@@ -641,10 +651,9 @@ impl Lock {
     #[inline]
     async fn acquire_async_with_internal<F: FnOnce(), const EXCLUSIVE: bool>(
         &self,
-        pinned_entry: Pin<&mut WaitQueue>,
+        wait_queue: Pin<&mut WaitQueue>,
         mut begin_wait: F,
     ) -> bool {
-        let pinned_entry = PinnedWaitQueue(pinned_entry.as_ref());
         loop {
             let (mut result, state) = if EXCLUSIVE {
                 self.try_lock_internal()
@@ -660,12 +669,14 @@ impl Lock {
             debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
             if let Some(returned) =
-                self.try_push_wait_queue_entry(pinned_entry.0, state, begin_wait)
+                self.try_push_wait_queue_entry(wait_queue.as_ref(), state, begin_wait)
             {
                 begin_wait = returned;
                 continue;
             }
 
+            let wait_queue = wait_queue.as_ref();
+            let pinned_entry = PinnedEntry(Pin::new(wait_queue.entry()));
             result = pinned_entry.await;
             debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
             return result == Self::ACQUIRED;
@@ -727,16 +738,13 @@ impl Lock {
                     // woke up the current lock owner has finished processing the wait queue is
                     // prevented by the wait queue processing method itself; `model.rs` proves it.
                     debug_assert_eq!(prev_state & WaitQueue::LOCKED_FLAG, 0);
-                    let entry_addr = prev_state & WaitQueue::ADDR_MASK;
-                    if entry_addr != 0 {
-                        WaitQueue::iter_forward(
-                            WaitQueue::addr_to_ptr(entry_addr),
-                            false,
-                            |entry, _| {
-                                entry.set_result(Self::POISONED);
-                                false
-                            },
-                        );
+                    let anchor_ptr = WaitQueue::to_anchor_ptr(prev_state);
+                    if !anchor_ptr.is_null() {
+                        let tail_entry_ptr = WaitQueue::to_entry_ptr(anchor_ptr);
+                        Entry::iter_forward(tail_entry_ptr, false, |entry, _| {
+                            entry.set_result(Self::POISONED);
+                            false
+                        });
                     }
 
                     return true;
@@ -779,7 +787,7 @@ impl SyncPrimitive for Lock {
     }
 
     #[inline]
-    fn drop_wait_queue_entry(entry: &WaitQueue) {
+    fn drop_wait_queue_entry(entry: &Entry) {
         Self::force_remove_wait_queue_entry(entry);
     }
 }

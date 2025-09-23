@@ -16,7 +16,7 @@ use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
-use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
+use crate::wait_queue::{Entry, PinnedEntry, WaitQueue};
 
 /// [`Semaphore`] is a synchronization primitive that allows a fixed number of threads to access a
 /// resource concurrently.
@@ -138,7 +138,10 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async(&self) {
-        let async_wait = pin!(WaitQueue::new(self, Opcode::Semaphore(1), false));
+        let async_wait = pin!(WaitQueue::default());
+        async_wait
+            .as_ref()
+            .construct(self, Opcode::Semaphore(1), false);
         self.acquire_async_with_internal(async_wait, 1, || {}).await;
     }
 
@@ -163,7 +166,10 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async_with<F: FnOnce()>(&self, begin_wait: F) {
-        let async_wait = pin!(WaitQueue::new(self, Opcode::Semaphore(1), false));
+        let async_wait = pin!(WaitQueue::default());
+        async_wait
+            .as_ref()
+            .construct(self, Opcode::Semaphore(1), false);
         self.acquire_async_with_internal(async_wait, 1, begin_wait)
             .await;
     }
@@ -246,8 +252,11 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_many_async(&self, count: usize) -> bool {
+        let async_wait = pin!(WaitQueue::default());
         #[allow(clippy::cast_possible_truncation)]
-        let async_wait = pin!(WaitQueue::new(self, Opcode::Semaphore(count as u8), false));
+        async_wait
+            .as_ref()
+            .construct(self, Opcode::Semaphore(count as u8), false);
         self.acquire_async_with_internal(async_wait, count, || {})
             .await
     }
@@ -274,8 +283,11 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) -> bool {
+        let async_wait = pin!(WaitQueue::default());
         #[allow(clippy::cast_possible_truncation)]
-        let async_wait = pin!(WaitQueue::new(self, Opcode::Semaphore(count as u8), false));
+        async_wait
+            .as_ref()
+            .construct(self, Opcode::Semaphore(count as u8), false);
         self.acquire_async_with_internal(async_wait, count, begin_wait)
             .await
     }
@@ -398,26 +410,27 @@ impl Semaphore {
         count: usize,
         is_sync: bool,
     ) -> bool {
-        if pager.entry().is_some() || count > Self::MAX_PERMITS {
+        if pager.wait_queue().is_some() || count > Self::MAX_PERMITS {
             return false;
         }
         let Ok(count) = u8::try_from(count) else {
             return false;
         };
 
-        pager.set_entry(WaitQueue::new(self, Opcode::Semaphore(count), is_sync));
+        pager.set_wait_queue();
+        let Some(wait_queue) = pager.wait_queue() else {
+            return false;
+        };
+        wait_queue.construct(self, Opcode::Semaphore(count), is_sync);
         loop {
-            let Some(pinned_entry) = pager.entry() else {
-                continue;
-            };
             let (result, state) = self.try_acquire_internal(count);
             if result {
-                pinned_entry.set_result(0);
+                wait_queue.entry().set_result(0);
                 break;
             }
 
             if self
-                .try_push_wait_queue_entry(pinned_entry, state, || ())
+                .try_push_wait_queue_entry(wait_queue, state, || ())
                 .is_none()
             {
                 break;
@@ -488,7 +501,7 @@ impl Semaphore {
     #[inline]
     async fn acquire_async_with_internal<F: FnOnce()>(
         &self,
-        pinned_entry: Pin<&mut WaitQueue>,
+        wait_queue: Pin<&mut WaitQueue>,
         count: usize,
         mut begin_wait: F,
     ) -> bool {
@@ -498,7 +511,6 @@ impl Semaphore {
         let Ok(count) = u8::try_from(count) else {
             return false;
         };
-        let pinned_entry = PinnedWaitQueue(pinned_entry.as_ref());
         loop {
             let (result, state) = self.try_acquire_internal(count);
             if result {
@@ -507,12 +519,14 @@ impl Semaphore {
             debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
             if let Some(returned) =
-                self.try_push_wait_queue_entry(pinned_entry.0, state, begin_wait)
+                self.try_push_wait_queue_entry(wait_queue.as_ref(), state, begin_wait)
             {
                 begin_wait = returned;
                 continue;
             }
 
+            let wait_queue = wait_queue.as_ref();
+            let pinned_entry = PinnedEntry(Pin::new(wait_queue.entry()));
             pinned_entry.await;
             return true;
         }
@@ -568,7 +582,7 @@ impl SyncPrimitive for Semaphore {
     }
 
     #[inline]
-    fn drop_wait_queue_entry(entry: &WaitQueue) {
+    fn drop_wait_queue_entry(entry: &Entry) {
         Self::force_remove_wait_queue_entry(entry);
     }
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+4.2.0
+
+* Remove the 128B alignment requirement for `WaitQueue`.
+
 4.1.0
 
 * API update for the `Pager` API: `Pager` is now explicitly `!Unpin`, and `poll_async` replaces direct `await` calls.

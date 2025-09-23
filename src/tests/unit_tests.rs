@@ -5,59 +5,46 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
-use crate::wait_queue::WaitQueue;
 use crate::{Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
+    let limit = 240;
     let lock = Lock::default();
 
     let lock_fut = &lock.lock_async();
-    assert_eq!(size_of_val(lock_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(lock_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(lock_fut) < limit);
 
     let lock_with_fut = &lock.lock_async_with(|| {});
-    assert_eq!(size_of_val(lock_with_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(lock_with_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(lock_with_fut) < limit);
 
     let share_fut = &lock.share_async();
-    assert_eq!(size_of_val(share_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(share_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(share_fut) < limit);
 
     let share_with_fut = &lock.share_async_with(|| {});
-    assert_eq!(size_of_val(share_with_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(share_with_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(share_with_fut) < limit);
 
     let semaphore = Semaphore::default();
 
     let acquire_fut = &semaphore.acquire_async();
-    assert_eq!(size_of_val(acquire_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(acquire_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(acquire_fut) < limit);
 
     let acquire_with_fut = &semaphore.acquire_async_with(|| {});
-    assert_eq!(size_of_val(acquire_with_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(acquire_with_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(acquire_with_fut) < limit);
 
     let acquire_many_fut = &semaphore.acquire_many_async(1);
-    assert_eq!(size_of_val(acquire_many_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(acquire_many_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(acquire_many_fut) < limit);
 
     let acquire_many_with_fut = &semaphore.acquire_many_async_with(1, || {});
-    assert_eq!(
-        size_of_val(acquire_many_with_fut),
-        size_of::<WaitQueue>() * 2
-    );
-    assert_eq!(align_of_val(acquire_many_with_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(acquire_many_with_fut) < limit);
 
     let gate = Gate::default();
 
     let enter_fut = &gate.enter_async();
-    assert_eq!(size_of_val(enter_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(enter_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(enter_fut) < limit);
 
     let enter_with_fut = &gate.enter_async_with(|| {});
-    assert_eq!(size_of_val(enter_with_fut), size_of::<WaitQueue>() * 2);
-    assert_eq!(align_of_val(enter_with_fut), align_of::<WaitQueue>());
+    assert!(size_of_val(enter_with_fut) < limit);
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]

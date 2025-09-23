@@ -14,7 +14,7 @@ use loom::sync::atomic::AtomicUsize;
 use crate::opcode::Opcode;
 use crate::pager::SyncResult;
 use crate::sync_primitive::SyncPrimitive;
-use crate::wait_queue::WaitQueue;
+use crate::wait_queue::{Entry, WaitQueue};
 use crate::{Pager, pager};
 
 /// [`Gate`] is a synchronization primitive that blocks tasks from entering a critical section until
@@ -292,7 +292,11 @@ impl Gate {
     #[inline]
     pub async fn enter_async(&self) -> Result<State, Error> {
         let mut pinned_pager = pin!(Pager::default());
-        pinned_pager.set_entry(WaitQueue::new(self, Opcode::Wait, false));
+        pinned_pager.set_wait_queue();
+        let Some(wait_queue) = pinned_pager.wait_queue() else {
+            return Err(Error::NotRegistered);
+        };
+        wait_queue.construct(self, Opcode::Wait, false);
         self.push_wait_queue_entry(&mut pinned_pager, || {});
         pinned_pager.poll_async().await
     }
@@ -325,7 +329,11 @@ impl Gate {
     #[inline]
     pub async fn enter_async_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
         let mut pinned_pager = pin!(Pager::default());
-        pinned_pager.set_entry(WaitQueue::new(self, Opcode::Wait, false));
+        pinned_pager.set_wait_queue();
+        let Some(wait_queue) = pinned_pager.wait_queue() else {
+            return Err(Error::NotRegistered);
+        };
+        wait_queue.construct(self, Opcode::Wait, false);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_async().await
     }
@@ -418,7 +426,11 @@ impl Gate {
     #[inline]
     pub fn enter_sync_with<F: FnOnce()>(&self, wait_callback: F) -> Result<State, Error> {
         let mut pinned_pager = pin!(Pager::default());
-        pinned_pager.set_entry(WaitQueue::new(self, Opcode::Wait, true));
+        pinned_pager.set_wait_queue();
+        let Some(wait_queue) = pinned_pager.wait_queue() else {
+            return Err(Error::NotRegistered);
+        };
+        wait_queue.construct(self, Opcode::Wait, true);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_sync()
     }
@@ -462,10 +474,14 @@ impl Gate {
         pager: &mut Pin<&mut Pager<'g, Self>>,
         is_sync: bool,
     ) -> bool {
-        if pager.entry().is_some() {
+        if pager.wait_queue().is_some() {
             return false;
         }
-        pager.set_entry(WaitQueue::new(self, Opcode::Wait, is_sync));
+        pager.set_wait_queue();
+        let Some(wait_queue) = pager.wait_queue() else {
+            return false;
+        };
+        wait_queue.construct(self, Opcode::Wait, is_sync);
         self.push_wait_queue_entry(pager, || ());
         true
     }
@@ -484,20 +500,17 @@ impl Gate {
         }) {
             Ok(value) | Err(value) => {
                 let mut count = 0;
-                let entry_addr = value & WaitQueue::ADDR_MASK;
                 let prev_state = State::from(value & WaitQueue::DATA_MASK);
                 let next_state = next_state.unwrap_or(prev_state);
                 let result = Self::into_u8(next_state, error);
-                if entry_addr != 0 {
-                    WaitQueue::iter_forward(
-                        WaitQueue::addr_to_ptr(entry_addr),
-                        false,
-                        |entry, _| {
-                            entry.set_result(result);
-                            count += 1;
-                            false
-                        },
-                    );
+                let anchor_ptr = WaitQueue::to_anchor_ptr(value);
+                if !anchor_ptr.is_null() {
+                    let tail_entry_ptr = WaitQueue::to_entry_ptr(anchor_ptr);
+                    Entry::iter_forward(tail_entry_ptr, false, |entry, _| {
+                        entry.set_result(result);
+                        count += 1;
+                        false
+                    });
                 }
                 (prev_state, count)
             }
@@ -511,23 +524,27 @@ impl Gate {
         pager: &mut Pin<&mut Pager<Self>>,
         mut wait_callback: F,
     ) {
-        if let Some(pinned_entry) = pager.entry() {
+        if let Some(wait_queue) = pager.wait_queue() {
             loop {
                 let state = self.state.load(Acquire);
                 match State::from(state & WaitQueue::DATA_MASK) {
                     State::Controlled => {
                         if let Some(returned) =
-                            self.try_push_wait_queue_entry(pinned_entry, state, wait_callback)
+                            self.try_push_wait_queue_entry(wait_queue, state, wait_callback)
                         {
                             wait_callback = returned;
                             continue;
                         }
                     }
                     State::Sealed => {
-                        pinned_entry.set_result(Self::into_u8(State::Sealed, Some(Error::Sealed)));
+                        wait_queue
+                            .entry()
+                            .set_result(Self::into_u8(State::Sealed, Some(Error::Sealed)));
                     }
                     State::Open => {
-                        pinned_entry.set_result(Self::into_u8(State::Open, None));
+                        wait_queue
+                            .entry()
+                            .set_result(Self::into_u8(State::Open, None));
                     }
                 }
                 break;
@@ -564,7 +581,7 @@ impl SyncPrimitive for Gate {
     }
 
     #[inline]
-    fn drop_wait_queue_entry(entry: &WaitQueue) {
+    fn drop_wait_queue_entry(entry: &Entry) {
         if entry.try_acknowledge_result().is_none() {
             let this: &Self = entry.sync_primitive_ref();
             this.wake_all(None, Some(Error::SpuriousFailure));

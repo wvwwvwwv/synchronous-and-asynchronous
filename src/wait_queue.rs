@@ -5,7 +5,7 @@ use std::future::Future;
 use std::marker::PhantomPinned;
 use std::mem::align_of;
 use std::pin::Pin;
-use std::ptr::{from_ref, null_mut, with_exposed_provenance};
+use std::ptr::{from_ref, null, null_mut, with_exposed_provenance};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::{AtomicPtr, AtomicU16};
@@ -24,13 +24,26 @@ use crate::sync_primitive::SyncPrimitive;
 /// Fair and heap-free intrusive wait queue for locking primitives in this crate.
 ///
 /// [`WaitQueue`] itself forms an intrusive linked list of entries where entries are pushed at the
-/// tail and popped from the head. [`WaitQueue`] is `128-byte` aligned thus allowing the lower 7
-/// bits to denote additional states.
-#[repr(align(128))]
-#[derive(Debug)]
+/// tail and popped from the head. [`WaitQueue`] is can be located using a `57-bit` pointer thus
+/// allowing the lower 7 bits to denote additional states.
+#[derive(Debug, Default)]
+#[repr(align(8))]
 pub(crate) struct WaitQueue {
-    /// Points to the entry that was pushed right before this entry.
-    next_entry_ptr: AtomicPtr<Self>,
+    /// Wait queue entry raw data.
+    #[cfg(not(feature = "loom"))]
+    raw_data: UnsafeCell<[u64; 16]>,
+    #[cfg(feature = "loom")] // Loom types are larger than those in the standard library.
+    raw_data: UnsafeCell<[[u64; 16]; 32]>,
+    /// The [`WaitQueue`] cannot be unpinned since it forms an intrusive linked list.
+    _pinned: PhantomPinned,
+}
+
+/// Wait queue entry.
+#[derive(Debug)]
+#[repr(align(8))]
+pub(crate) struct Entry {
+    /// Points to the entry anchor that was pushed right before this entry.
+    next_entry_anchor_ptr: AtomicPtr<u64>,
     /// Points to the entry that was pushed right after this entry.
     prev_entry_ptr: AtomicPtr<Self>,
     /// Operation type.
@@ -42,15 +55,15 @@ pub(crate) struct WaitQueue {
     /// Monitors the result.
     monitor: Monitor,
     /// Context cleanup function when a [`WaitQueue`] is cancelled.
-    drop_callback: fn(&WaitQueue),
+    drop_callback: fn(&Self),
     /// Address of the corresponding synchronization primitive.
     addr: usize,
-    /// The [`WaitQueue`] cannot be unpinned since it forms an intrusive linked list.
-    _pinned: PhantomPinned,
+    /// Offset of the entry within the wait queue.
+    offset: u16,
 }
 
 /// Helper struct for pinning a [`WaitQueue`] to the stack and awaiting it without consuming it.
-pub(crate) struct PinnedWaitQueue<'w>(pub(crate) Pin<&'w WaitQueue>);
+pub(crate) struct PinnedEntry<'e>(pub(crate) Pin<&'e Entry>);
 
 /// Contextual data for asynchronous [`WaitQueue`].
 #[derive(Debug)]
@@ -76,17 +89,148 @@ enum Monitor {
 }
 
 impl WaitQueue {
-    /// A [`WaitQueue`] method is used in the wrong mode.
-    pub(crate) const ERROR_WRONG_MODE: u8 = u8::MAX;
+    /// Virtual alignment of the wait queue.
+    #[cfg(not(feature = "loom"))]
+    pub(crate) const VIRTUAL_ALIGNMENT: usize = 128;
+    #[cfg(feature = "loom")]
+    pub(crate) const VIRTUAL_ALIGNMENT: usize = 4096;
 
     /// Indicates that the wait queue is being processed by a thread.
-    pub(crate) const LOCKED_FLAG: usize = align_of::<Self>() >> 1;
+    #[cfg(not(feature = "loom"))]
+    pub(crate) const LOCKED_FLAG: usize = Self::VIRTUAL_ALIGNMENT >> 1;
+    #[cfg(feature = "loom")]
+    pub(crate) const LOCKED_FLAG: usize = 64;
 
     /// Mask to extract additional information tagged with the [`WaitQueue`] memory address.
-    pub(crate) const DATA_MASK: usize = (align_of::<Self>() >> 1) - 1;
+    pub(crate) const DATA_MASK: usize = Self::LOCKED_FLAG - 1;
 
     /// Mask to extract the memory address part from a `usize` value.
     pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
+
+    /// Creates a new [`WaitQueue`].
+    pub(crate) fn construct<S: SyncPrimitive>(
+        self: Pin<&Self>,
+        sync_primitive: &S,
+        opcode: Opcode,
+        is_sync: bool,
+    ) {
+        debug_assert_eq!(align_of::<WaitQueue>(), 8);
+        debug_assert_eq!(align_of::<Entry>(), 8);
+        debug_assert!(size_of::<Entry>() <= Self::VIRTUAL_ALIGNMENT / 2);
+
+        let (anchor_ptr, offset) = self.anchor_ptr();
+        unsafe {
+            // `0` represents the initial state, therefore take the compliment of the offset.
+            *anchor_ptr.cast_mut() = u64::MAX - u64::try_from(offset).unwrap_or(0);
+        }
+        let entry_ptr = Self::to_entry_ptr(anchor_ptr);
+        let monitor = if is_sync {
+            Monitor::Sync(SyncContext {
+                thread: UnsafeCell::new(None),
+            })
+        } else {
+            Monitor::Async(AsyncContext {
+                waker: UnsafeCell::new(None),
+            })
+        };
+        let entry = Entry {
+            next_entry_anchor_ptr: AtomicPtr::new(null_mut()),
+            prev_entry_ptr: AtomicPtr::new(null_mut()),
+            opcode,
+            state: AtomicU16::new(0),
+            enqueued: std::sync::atomic::AtomicBool::new(false),
+            monitor,
+            drop_callback: S::drop_wait_queue_entry,
+            addr: sync_primitive.addr(),
+            offset: u16::try_from(
+                entry_ptr.expose_provenance() - self.raw_data.get().expose_provenance(),
+            )
+            .unwrap_or(0),
+        };
+        unsafe {
+            entry_ptr.cast_mut().write(entry);
+        }
+    }
+
+    /// Returns a reference to the entry.
+    #[inline]
+    pub(crate) fn entry(&self) -> &Entry {
+        unsafe { &*Self::to_entry_ptr(self.anchor_ptr().0) }
+    }
+
+    /// Returns the entry pointer derived from the anchor pointer.
+    #[inline]
+    pub(crate) fn to_entry_ptr(anchor_ptr: *const u64) -> *const Entry {
+        let anchor_val = unsafe { *anchor_ptr };
+        if anchor_val == 0 {
+            // No entry exists.
+            return null();
+        }
+
+        anchor_ptr
+            .map_addr(|addr| {
+                debug_assert_eq!(addr % Self::VIRTUAL_ALIGNMENT, 0);
+
+                let offset = usize::try_from(u64::MAX - anchor_val).unwrap_or(0);
+                let start_addr = addr - offset;
+                debug_assert_eq!(start_addr % 8, 0);
+
+                if offset < Self::VIRTUAL_ALIGNMENT / 2 {
+                    // The anchor is in the first half, so the entry is in the second half.
+                    start_addr + Self::VIRTUAL_ALIGNMENT / 2
+                } else {
+                    // The anchor is in the second half, so the entry is in the first half.
+                    start_addr
+                }
+            })
+            .cast::<Entry>()
+    }
+
+    /// Converts a synchronization primitive state into an anchor pointer.
+    #[inline]
+    pub(crate) fn to_anchor_ptr(state: usize) -> *const u64 {
+        let anchor_addr = state & Self::ADDR_MASK;
+        if anchor_addr == 0 {
+            return null();
+        }
+        with_exposed_provenance::<u64>(anchor_addr)
+    }
+
+    /// Returns the anchor pointer that is used to locate the wait queue entry.
+    pub(crate) fn anchor_ptr(&self) -> (*const u64, usize) {
+        let start_addr = self.raw_data.get();
+        let mut offset = 0;
+        let anchor_ptr = start_addr
+            .map_addr(|addr| {
+                let anchor_addr = if addr % Self::VIRTUAL_ALIGNMENT == 0 {
+                    // Perfectly aligned, so the anchor is at the start address, and the entry is at
+                    // 64th byte.
+                    //
+                    // `128: start/anchor | 192: entry`.
+                    addr
+                } else {
+                    // If the address is not perfectly aligned, we need to round up to the next
+                    // multiple of `Self::VIRTUAL_ALIGNMENT`.
+                    //
+                    // `32: start/entry | 128: anchor`.
+                    // `64: start/entry | 128: anchor`.
+                    // `96: start | 128: anchor | 160: entry`.
+                    addr + Self::VIRTUAL_ALIGNMENT - (addr % Self::VIRTUAL_ALIGNMENT)
+                };
+                debug_assert_eq!(addr % 8, 0);
+                debug_assert_eq!(anchor_addr % Self::VIRTUAL_ALIGNMENT, 0);
+                debug_assert!(anchor_addr - addr < Self::VIRTUAL_ALIGNMENT);
+                offset = anchor_addr - addr;
+                anchor_addr
+            })
+            .cast::<u64>();
+        (anchor_ptr, offset)
+    }
+}
+
+impl Entry {
+    /// A method is used in the wrong mode.
+    pub(crate) const ERROR_WRONG_MODE: u8 = u8::MAX;
 
     /// Indicates that a result is set.
     const RESULT_SET: u16 = 1_u16 << u8::BITS;
@@ -100,54 +244,51 @@ impl WaitQueue {
     /// Indicates that a result is acknowledged.
     const RESULT_ACKED: u16 = 1_u16 << (u8::BITS + 3);
 
-    /// Creates a new [`WaitQueue`].
-    pub(crate) fn new<S: SyncPrimitive>(this: &S, opcode: Opcode, is_sync: bool) -> Self {
-        let monitor = if is_sync {
-            Monitor::Sync(SyncContext {
-                thread: UnsafeCell::new(None),
-            })
-        } else {
-            Monitor::Async(AsyncContext {
-                waker: UnsafeCell::new(None),
-            })
-        };
-        Self {
-            next_entry_ptr: AtomicPtr::new(null_mut()),
-            prev_entry_ptr: AtomicPtr::new(null_mut()),
-            opcode,
-            state: AtomicU16::new(0),
-            enqueued: std::sync::atomic::AtomicBool::new(false),
-            monitor,
-            drop_callback: S::drop_wait_queue_entry,
-            addr: this.addr(),
-            _pinned: PhantomPinned,
-        }
+    /// Returns the anchor pointer derived from the entry pointer.
+    #[inline]
+    pub(crate) fn to_wait_queue_ptr(entry_ptr: *const Self) -> *const WaitQueue {
+        entry_ptr
+            .map_addr(|addr| addr - unsafe { usize::from((*entry_ptr).offset) })
+            .cast::<WaitQueue>()
     }
 
-    /// Gets a raw pointer to the next entry.
+    /// Gets a pointer to the next entry anchor.
+    ///
+    /// The next entry is the one that was pushed right before this entry.
+    pub(crate) fn next_entry_anchor_ptr(&self) -> *const u64 {
+        self.next_entry_anchor_ptr.load(Acquire)
+    }
+
+    /// Gets a pointer to the next entry.
     ///
     /// The next entry is the one that was pushed right before this entry.
     pub(crate) fn next_entry_ptr(&self) -> *const Self {
-        self.next_entry_ptr.load(Acquire)
+        let anchor_ptr = self.next_entry_anchor_ptr.load(Acquire);
+        if anchor_ptr.is_null() {
+            return null();
+        }
+        WaitQueue::to_entry_ptr(anchor_ptr)
     }
 
-    /// Gets a raw pointer to the previous entry.
+    /// Gets a pointer to the previous entry.
     ///
     /// The previous entry is the one that was pushed right after this entry.
     pub(crate) fn prev_entry_ptr(&self) -> *const Self {
         self.prev_entry_ptr.load(Acquire)
     }
 
-    /// Updates the next entry pointer.
-    pub(crate) fn update_next_entry_ptr(&self, next_entry_ptr: *const Self) {
-        debug_assert_eq!(next_entry_ptr as usize % align_of::<Self>(), 0);
-        self.next_entry_ptr
-            .store(next_entry_ptr.cast_mut(), Release);
+    /// Updates the next entry anchor pointer.
+    pub(crate) fn update_next_entry_anchor_ptr(&self, next_entry_anchor_ptr: *const u64) {
+        debug_assert_eq!(
+            next_entry_anchor_ptr as usize % WaitQueue::VIRTUAL_ALIGNMENT,
+            0
+        );
+        self.next_entry_anchor_ptr
+            .store(next_entry_anchor_ptr.cast_mut(), Release);
     }
 
     /// Updates the previous entry pointer.
     pub(crate) fn update_prev_entry_ptr(&self, prev_entry_ptr: *const Self) {
-        debug_assert_eq!(prev_entry_ptr as usize % align_of::<Self>(), 0);
         self.prev_entry_ptr
             .store(prev_entry_ptr.cast_mut(), Release);
     }
@@ -161,12 +302,6 @@ impl WaitQueue {
     pub(crate) const fn ref_to_ptr(this: &Self) -> *const Self {
         let wait_queue_ptr: *const Self = from_ref(this);
         wait_queue_ptr
-    }
-
-    /// Converts the memory address of `Self` to a raw pointer.
-    pub(crate) fn addr_to_ptr(wait_queue_addr: usize) -> *const Self {
-        debug_assert_eq!(wait_queue_addr % align_of::<Self>(), 0);
-        with_exposed_provenance(wait_queue_addr)
     }
 
     /// Returns the corresponding synchronization primitive reference.
@@ -271,14 +406,14 @@ impl WaitQueue {
                 match &self.monitor {
                     Monitor::Async(async_context) => {
                         if let Some(waker) = (*async_context.waker.get()).take() {
-                            self.state.fetch_or(Self::RESULT_FINALIZED, Release);
+                            self.state.fetch_or(Self::RESULT_FINALIZED, AcqRel);
                             waker.wake();
                             return;
                         }
                     }
                     Monitor::Sync(sync_context) => {
                         if let Some(thread) = (*sync_context.thread.get()).take() {
-                            self.state.fetch_or(Self::RESULT_FINALIZED, Release);
+                            self.state.fetch_or(Self::RESULT_FINALIZED, AcqRel);
                             thread.unpark();
                             return;
                         }
@@ -286,7 +421,7 @@ impl WaitQueue {
                 }
             }
         }
-        self.state.fetch_or(Self::RESULT_FINALIZED, Release);
+        self.state.fetch_or(Self::RESULT_FINALIZED, AcqRel);
     }
 
     /// Polls the result, asynchronously.
@@ -418,26 +553,43 @@ impl WaitQueue {
         }
         None
     }
+
+    /// Prepares for dropping `self`.
+    fn prepare_drop(entry_ptr: *mut Self) {
+        let this = unsafe { &mut *entry_ptr };
+        let state = this.state.load(Acquire);
+        // The wait queue entry was enqueued or had a result set but was not acknowledged.
+        //
+        // The wait queue entry owner will acquire the resource or has already acquired it without
+        // knowing it, therefore the resource needs to be released.
+        if (this.enqueued.load(Acquire) || state & Self::RESULT_SET == Self::RESULT_SET)
+            && state & Self::RESULT_ACKED == 0
+        {
+            (this.drop_callback)(this);
+            this.enqueued.store(false, Release);
+        }
+    }
 }
 
 impl Drop for WaitQueue {
     #[inline]
     fn drop(&mut self) {
-        let state = self.state.load(Acquire);
-
-        // The wait queue entry was enqueued or had a result set but was not acknowledged.
-        //
-        // The wait queue entry owner will acquire the resource or has already acquired it without
-        // knowing it, therefore the resource needs to be released.
-        if (self.enqueued.load(Acquire) || state & Self::RESULT_SET == Self::RESULT_SET)
-            && state & Self::RESULT_ACKED == 0
-        {
-            (self.drop_callback)(self);
+        let anchor_ptr = self.anchor_ptr().0;
+        let entry_ptr = Self::to_entry_ptr(anchor_ptr).cast_mut();
+        if entry_ptr.is_null() {
+            return;
+        }
+        unsafe {
+            Entry::prepare_drop(entry_ptr);
+            entry_ptr.drop_in_place();
         }
     }
 }
 
-impl Future for PinnedWaitQueue<'_> {
+unsafe impl Send for WaitQueue {}
+unsafe impl Sync for WaitQueue {}
+
+impl Future for PinnedEntry<'_> {
     type Output = u8;
 
     #[inline]

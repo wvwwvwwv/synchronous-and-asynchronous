@@ -4,7 +4,7 @@ use std::cell::UnsafeCell;
 use std::marker::{PhantomData, PhantomPinned};
 use std::pin::Pin;
 
-use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
+use crate::wait_queue::{Entry, PinnedEntry, WaitQueue};
 
 /// Tasks holding a [`Pager`] can remotely acquire a desired resource.
 ///
@@ -13,8 +13,8 @@ use crate::wait_queue::{PinnedWaitQueue, WaitQueue};
 /// may lead to undefined behavior, therefore [`Pager`] does not implement [`Unpin`].
 #[derive(Debug, Default)]
 pub struct Pager<'s, S: SyncResult> {
-    /// The wait queue entry for the [`Pager`].
-    entry: UnsafeCell<Option<WaitQueue>>,
+    /// The wait queue for the [`Pager`].
+    wait_queue: UnsafeCell<Option<WaitQueue>>,
     /// The [`Pager`] cannot outlive the associated synchronization primitive.
     _phantom: PhantomData<&'s S>,
     /// The [`Pager`] cannot be unpinned.
@@ -64,7 +64,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// ```
     #[inline]
     pub fn is_registered(&self) -> bool {
-        self.entry().is_some()
+        self.wait_queue().is_some()
     }
 
     /// Returns `true` if the [`Pager`] can only be polled synchronously.
@@ -91,7 +91,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// ```
     #[inline]
     pub fn is_sync(&self) -> bool {
-        self.entry().is_some_and(|e| e.is_sync())
+        self.wait_queue().is_some_and(|w| w.entry().is_sync())
     }
 
     /// Waits for the desired resource to become available asynchronously.
@@ -118,15 +118,15 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// ```
     #[inline]
     pub async fn poll_async(self: &mut Pin<&mut Pager<'s, S>>) -> S::Result {
-        let Some(entry) = self.entry() else {
+        let Some(wait_queue) = self.wait_queue() else {
             return S::to_result(0, Some(Error::NotRegistered));
         };
-        let pinned_entry = PinnedWaitQueue(entry);
+        let pinned_entry = PinnedEntry(Pin::new(wait_queue.entry()));
         let result = pinned_entry.await;
-        if result == WaitQueue::ERROR_WRONG_MODE {
+        if result == Entry::ERROR_WRONG_MODE {
             return S::to_result(result, Some(Error::WrongMode));
         }
-        self.with_entry_mut(|e| {
+        self.with_wait_queue_mut(|e| {
             *e = None;
         });
         S::to_result(result, None)
@@ -154,15 +154,16 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// ```
     #[inline]
     pub fn poll_sync(self: &mut Pin<&mut Pager<'s, S>>) -> S::Result {
-        self.with_entry_mut(|e| {
-            let Some(entry) = e else {
+        self.with_wait_queue_mut(|w| {
+            let Some(wait_queue) = w else {
                 return S::to_result(0, Some(Error::NotRegistered));
             };
+            let entry = wait_queue.entry();
             let result = entry.poll_result_sync();
-            if result == WaitQueue::ERROR_WRONG_MODE {
+            if result == Entry::ERROR_WRONG_MODE {
                 return S::to_result(0, Some(Error::WrongMode));
             }
-            e.take();
+            *w = None;
             S::to_result(result, None)
         })
     }
@@ -191,11 +192,12 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// ```
     #[inline]
     pub fn try_poll(&self) -> S::Result {
-        self.with_entry(|e| {
-            let Some(entry) = e else {
+        self.with_wait_queue(|w| {
+            let Some(wait_queue) = w else {
                 return S::to_result(0, Some(Error::NotRegistered));
             };
 
+            let entry = wait_queue.entry();
             if let Some(result) = entry.try_acknowledge_result() {
                 S::to_result(result, None)
             } else {
@@ -206,27 +208,31 @@ impl<'s, S: SyncResult> Pager<'s, S> {
 
     /// Returns a reference to the wait queue entry.
     #[inline]
-    pub(crate) fn entry(&self) -> Option<Pin<&WaitQueue>> {
-        unsafe { (*self.entry.get()).as_ref().map(|w| Pin::new_unchecked(w)) }
+    pub(crate) fn wait_queue(&self) -> Option<Pin<&WaitQueue>> {
+        unsafe {
+            (*self.wait_queue.get())
+                .as_ref()
+                .map(|w| Pin::new_unchecked(w))
+        }
     }
 
     /// Sets the wait queue entry.
     ///
     /// The user must make sure that the `self` is exclusively owned.
     #[inline]
-    pub(crate) fn set_entry(&self, entry: WaitQueue) {
-        self.with_entry_mut(|e| e.replace(entry));
+    pub(crate) fn set_wait_queue(&self) {
+        self.with_wait_queue_mut(|e| e.replace(WaitQueue::default()));
     }
 
-    /// Returns a reference to the wait queue entry.
+    /// Returns a reference to the wait queue.
     #[inline]
-    fn with_entry<R, F: FnOnce(&Option<WaitQueue>) -> R>(&self, f: F) -> R {
-        unsafe { f(&(*self.entry.get())) }
+    fn with_wait_queue<R, F: FnOnce(&Option<WaitQueue>) -> R>(&self, f: F) -> R {
+        unsafe { f(&(*self.wait_queue.get())) }
     }
 
-    /// Returns a reference to the wait queue entry.
+    /// Returns a reference to the wait queue.
     #[inline]
-    fn with_entry_mut<R, F: FnOnce(&mut Option<WaitQueue>) -> R>(&self, f: F) -> R {
-        unsafe { f(&mut (*self.entry.get())) }
+    fn with_wait_queue_mut<R, F: FnOnce(&mut Option<WaitQueue>) -> R>(&self, f: F) -> R {
+        unsafe { f(&mut (*self.wait_queue.get())) }
     }
 }

@@ -1,7 +1,7 @@
 //! Define base operations for synchronization primitives.
 
 use std::pin::{Pin, pin};
-use std::ptr::{addr_of, null};
+use std::ptr::{addr_of, null, with_exposed_provenance};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
@@ -11,7 +11,7 @@ use std::thread;
 use loom::sync::atomic::AtomicUsize;
 
 use crate::opcode::Opcode;
-use crate::wait_queue::WaitQueue;
+use crate::wait_queue::{Entry, WaitQueue};
 
 /// Defines base operations for synchronization primitives.
 pub(crate) trait SyncPrimitive: Sized {
@@ -22,7 +22,7 @@ pub(crate) trait SyncPrimitive: Sized {
     fn max_shared_owners() -> usize;
 
     /// Called when an enqueued wait queue entry is being dropped without acknowledging the result.
-    fn drop_wait_queue_entry(entry: &WaitQueue);
+    fn drop_wait_queue_entry(entry: &Entry);
 
     /// Converts a reference to `Self` into a memory address.
     fn addr(&self) -> usize {
@@ -34,22 +34,28 @@ pub(crate) trait SyncPrimitive: Sized {
     #[must_use]
     fn try_push_wait_queue_entry<F: FnOnce()>(
         &self,
-        entry: Pin<&WaitQueue>,
+        wait_queue: Pin<&WaitQueue>,
         state: usize,
         begin_wait: F,
     ) -> Option<F> {
-        let entry_addr = WaitQueue::ref_to_ptr(&entry).expose_provenance();
-        debug_assert_eq!(entry_addr & (!WaitQueue::ADDR_MASK), 0);
+        let anchor_ptr = wait_queue.anchor_ptr().0;
+        let anchor_addr = anchor_ptr.expose_provenance();
+        debug_assert_eq!(anchor_addr & (!WaitQueue::ADDR_MASK), 0);
 
-        entry.update_next_entry_ptr(WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK));
-        let next_state = (state & (!WaitQueue::ADDR_MASK)) | entry_addr;
+        let tail_anchor_ptr = WaitQueue::to_anchor_ptr(state);
+        wait_queue
+            .entry()
+            .update_next_entry_anchor_ptr(tail_anchor_ptr);
+
+        // The anchor pointer, instead of an entry pointer, is stored in the state.
+        let next_state = (state & (!WaitQueue::ADDR_MASK)) | anchor_addr;
         if self
             .state()
             .compare_exchange(state, next_state, AcqRel, Acquire)
             .is_ok()
         {
             // The entry cannot be dropped until the result is acknowledged.
-            entry.enqueued();
+            wait_queue.entry().enqueued();
             begin_wait();
             None
         } else {
@@ -66,13 +72,14 @@ pub(crate) trait SyncPrimitive: Sized {
     ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
-        let pinned_entry = pin!(WaitQueue::new(self, mode, true));
+        let pinned_wait_queue = pin!(WaitQueue::default());
+        pinned_wait_queue.as_ref().construct(self, mode, true);
         if let Some(returned) =
-            self.try_push_wait_queue_entry(pinned_entry.as_ref(), state, begin_wait)
+            self.try_push_wait_queue_entry(pinned_wait_queue.as_ref(), state, begin_wait)
         {
             return Err(returned);
         }
-        Ok(pinned_entry.poll_result_sync())
+        Ok(pinned_wait_queue.entry().poll_result_sync())
     }
 
     /// Releases the resource represented by the supplied operation mode.
@@ -111,28 +118,31 @@ pub(crate) trait SyncPrimitive: Sized {
     }
 
     /// Processes the wait queue.
+    ///
+    /// The tail entry of the wait queue is either reset or stays the same.
     fn process_wait_queue(&self, mut state: usize) {
-        let mut head_entry_ptr: *const WaitQueue = null();
+        let mut head_entry_ptr: *const Entry = null();
         let mut unlocked = false;
         while !unlocked {
             debug_assert_eq!(state & WaitQueue::LOCKED_FLAG, WaitQueue::LOCKED_FLAG);
 
-            let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
+            let anchor_ptr = WaitQueue::to_anchor_ptr(state);
+            let tail_entry_ptr = WaitQueue::to_entry_ptr(anchor_ptr);
             if head_entry_ptr.is_null() {
-                WaitQueue::iter_forward(tail_entry_ptr, true, |entry, next_entry| {
-                    head_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                Entry::iter_forward(tail_entry_ptr, true, |entry, next_entry| {
+                    head_entry_ptr = Entry::ref_to_ptr(entry);
                     next_entry.is_none()
                 });
             } else {
-                WaitQueue::set_prev_ptr(tail_entry_ptr);
+                Entry::set_prev_ptr(tail_entry_ptr);
             }
 
             let data = state & WaitQueue::DATA_MASK;
             let mut transferred = 0;
-            let mut resolved_entry_ptr: *const WaitQueue = null();
+            let mut resolved_entry_ptr: *const Entry = null();
             let mut reset_failed = false;
 
-            WaitQueue::iter_backward(head_entry_ptr, |entry, prev_entry| {
+            Entry::iter_backward(head_entry_ptr, |entry, prev_entry| {
                 let desired = entry.opcode().release_count();
                 if data + transferred == 0
                     || data + transferred + desired <= Self::max_shared_owners()
@@ -140,7 +150,7 @@ pub(crate) trait SyncPrimitive: Sized {
                     // The entry can inherit ownership.
                     if prev_entry.is_some() {
                         transferred += desired;
-                        resolved_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                        resolved_entry_ptr = Entry::ref_to_ptr(entry);
                         false
                     } else {
                         // This is the tail of the wait queue: try to reset.
@@ -151,21 +161,21 @@ pub(crate) trait SyncPrimitive: Sized {
                             .is_err()
                         {
                             // This entry will be processed on the next retry.
-                            entry.update_next_entry_ptr(null());
-                            head_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                            entry.update_next_entry_anchor_ptr(null());
+                            head_entry_ptr = Entry::ref_to_ptr(entry);
                             reset_failed = true;
                             return true;
                         }
 
                         // The wait queue was reset.
                         unlocked = true;
-                        resolved_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                        resolved_entry_ptr = Entry::ref_to_ptr(entry);
                         true
                     }
                 } else {
                     // Unlink those that have succeeded in acquiring shared ownership.
-                    entry.update_next_entry_ptr(null());
-                    head_entry_ptr = WaitQueue::ref_to_ptr(entry);
+                    entry.update_next_entry_anchor_ptr(null());
+                    head_entry_ptr = Entry::ref_to_ptr(entry);
                     true
                 }
             });
@@ -192,7 +202,7 @@ pub(crate) trait SyncPrimitive: Sized {
                 state = self.state().fetch_add(transferred, AcqRel) + transferred;
             }
 
-            WaitQueue::iter_forward(resolved_entry_ptr, false, |entry, _next_entry| {
+            Entry::iter_forward(resolved_entry_ptr, false, |entry, _next_entry| {
                 entry.set_result(0);
                 false
             });
@@ -203,31 +213,37 @@ pub(crate) trait SyncPrimitive: Sized {
     fn remove_wait_queue_entry(
         &self,
         mut state: usize,
-        entry_addr_to_remove: usize,
+        entry_ptr_to_remove: *const Entry,
     ) -> (usize, bool) {
-        let target_ptr = WaitQueue::addr_to_ptr(entry_addr_to_remove);
         let mut result = Ok((state, false));
 
         loop {
             debug_assert_eq!(state & WaitQueue::LOCKED_FLAG, WaitQueue::LOCKED_FLAG);
             debug_assert_ne!(state & WaitQueue::ADDR_MASK, 0);
 
-            let tail_entry_ptr = WaitQueue::addr_to_ptr(state & WaitQueue::ADDR_MASK);
-            WaitQueue::iter_forward(tail_entry_ptr, true, |entry, next_entry| {
-                if WaitQueue::ref_to_ptr(entry) == target_ptr {
+            let anchor_ptr = WaitQueue::to_anchor_ptr(state);
+            let tail_entry_ptr = WaitQueue::to_entry_ptr(anchor_ptr);
+            Entry::iter_forward(tail_entry_ptr, true, |entry, next_entry| {
+                if Entry::ref_to_ptr(entry) == entry_ptr_to_remove {
+                    // Found the entry to remove.
                     let prev_entry_ptr = entry.prev_entry_ptr();
                     if let Some(next_entry) = next_entry {
                         next_entry.update_prev_entry_ptr(prev_entry_ptr);
                     }
                     result = if let Some(prev_entry) = unsafe { prev_entry_ptr.as_ref() } {
-                        prev_entry.update_next_entry_ptr(entry.next_entry_ptr());
+                        // Successfully unlinked the target entry without updating the state.
+                        prev_entry.update_next_entry_anchor_ptr(entry.next_entry_anchor_ptr());
                         Ok((state, true))
                     } else if let Some(next_entry) = next_entry {
-                        let next_entry_ptr = WaitQueue::ref_to_ptr(next_entry);
-                        debug_assert_eq!(next_entry_ptr.addr() & (!WaitQueue::ADDR_MASK), 0);
+                        // The next entry becomes the new tail of the wait queue.
+                        let next_entry_addr = Entry::ref_to_ptr(next_entry).expose_provenance();
+                        let next_entry_ptr = with_exposed_provenance(next_entry_addr);
+                        let new_tail_ptr = Entry::to_wait_queue_ptr(next_entry_ptr);
+                        let new_anchor_ptr = unsafe { (*new_tail_ptr).anchor_ptr().0 };
+                        debug_assert_eq!(new_anchor_ptr.addr() & (!WaitQueue::ADDR_MASK), 0);
 
                         let next_state =
-                            (state & (!WaitQueue::ADDR_MASK)) | next_entry_ptr.expose_provenance();
+                            (state & (!WaitQueue::ADDR_MASK)) | new_anchor_ptr.expose_provenance();
                         debug_assert_eq!(
                             next_state & WaitQueue::LOCKED_FLAG,
                             WaitQueue::LOCKED_FLAG
@@ -258,10 +274,9 @@ pub(crate) trait SyncPrimitive: Sized {
 
     /// Removes a [`WaitQueue`] entry that was pushed into the wait queue but has not been
     /// processed.
-    fn force_remove_wait_queue_entry(entry: &WaitQueue) {
+    fn force_remove_wait_queue_entry(entry: &Entry) {
         let this: &Self = entry.sync_primitive_ref();
-        let wait_queue_ptr: *const WaitQueue = addr_of!(*entry);
-        let wait_queue_addr = wait_queue_ptr.expose_provenance();
+        let this_ptr: *const Entry = addr_of!(*entry);
 
         // Remove the wait queue entry from the wait queue list.
         let mut state = this.state().load(Acquire);
@@ -284,7 +299,7 @@ pub(crate) trait SyncPrimitive: Sized {
                 state = new_state;
             } else {
                 let (new_state, removed) =
-                    this.remove_wait_queue_entry(state | WaitQueue::LOCKED_FLAG, wait_queue_addr);
+                    this.remove_wait_queue_entry(state | WaitQueue::LOCKED_FLAG, this_ptr);
                 if new_state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
                     // We need to process the wait queue if it is still locked.
                     this.process_wait_queue(new_state);
