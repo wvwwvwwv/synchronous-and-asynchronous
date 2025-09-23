@@ -24,12 +24,19 @@ use crate::sync_primitive::SyncPrimitive;
 /// Fair and heap-free intrusive wait queue for locking primitives in this crate.
 ///
 /// [`WaitQueue`] itself forms an intrusive linked list of entries where entries are pushed at the
-/// tail and popped from the head. [`WaitQueue`] is can be located using a `57-bit` pointer thus
-/// allowing the lower 7 bits to denote additional states.
+/// tail and popped from the head.
 #[derive(Debug, Default)]
 #[repr(align(8))]
 pub(crate) struct WaitQueue {
     /// Wait queue entry raw data.
+    ///
+    /// The raw data is used to instantiate an anchor of the wait queue entry at a 128B aligned
+    /// memory address. The anchor contains an offset value that enables other threads to locate
+    /// the [`WaitQueue`] and its [`Entry`].
+    ///
+    /// An [`Entry`] is instantiated either the first or second half of the raw data area, and
+    /// which one of the two is determined by the offset value in the anchor: one that does not
+    /// overlap with the anchor.
     #[cfg(not(feature = "loom"))]
     raw_data: UnsafeCell<[u64; 16]>,
     #[cfg(feature = "loom")] // Loom types are larger than those in the standard library.
@@ -197,6 +204,7 @@ impl WaitQueue {
     }
 
     /// Returns the anchor pointer that is used to locate the wait queue entry.
+    #[inline]
     pub(crate) fn anchor_ptr(&self) -> (*const u64, usize) {
         let start_addr = self.raw_data.get();
         let mut offset = 0;
@@ -227,6 +235,25 @@ impl WaitQueue {
         (anchor_ptr, offset)
     }
 }
+
+impl Drop for WaitQueue {
+    #[inline]
+    fn drop(&mut self) {
+        let anchor_ptr = self.anchor_ptr().0;
+        let entry_ptr = Self::to_entry_ptr(anchor_ptr).cast_mut();
+        if entry_ptr.is_null() {
+            return;
+        }
+
+        Entry::prepare_drop(entry_ptr);
+        unsafe {
+            entry_ptr.drop_in_place();
+        }
+    }
+}
+
+unsafe impl Send for WaitQueue {}
+unsafe impl Sync for WaitQueue {}
 
 impl Entry {
     /// A method is used in the wrong mode.
@@ -262,6 +289,7 @@ impl Entry {
     /// Gets a pointer to the next entry.
     ///
     /// The next entry is the one that was pushed right before this entry.
+    #[inline]
     pub(crate) fn next_entry_ptr(&self) -> *const Self {
         let anchor_ptr = self.next_entry_anchor_ptr.load(Acquire);
         if anchor_ptr.is_null() {
@@ -273,11 +301,13 @@ impl Entry {
     /// Gets a pointer to the previous entry.
     ///
     /// The previous entry is the one that was pushed right after this entry.
+    #[inline]
     pub(crate) fn prev_entry_ptr(&self) -> *const Self {
         self.prev_entry_ptr.load(Acquire)
     }
 
     /// Updates the next entry anchor pointer.
+    #[inline]
     pub(crate) fn update_next_entry_anchor_ptr(&self, next_entry_anchor_ptr: *const u64) {
         debug_assert_eq!(
             next_entry_anchor_ptr as usize % WaitQueue::VIRTUAL_ALIGNMENT,
@@ -288,6 +318,7 @@ impl Entry {
     }
 
     /// Updates the previous entry pointer.
+    #[inline]
     pub(crate) fn update_prev_entry_ptr(&self, prev_entry_ptr: *const Self) {
         self.prev_entry_ptr
             .store(prev_entry_ptr.cast_mut(), Release);
@@ -299,12 +330,14 @@ impl Entry {
     }
 
     /// Converts a reference to `Self` to a raw pointer.
+    #[inline]
     pub(crate) const fn ref_to_ptr(this: &Self) -> *const Self {
         let wait_queue_ptr: *const Self = from_ref(this);
         wait_queue_ptr
     }
 
     /// Returns the corresponding synchronization primitive reference.
+    #[inline]
     pub(crate) fn sync_primitive_ref<S: SyncPrimitive>(&self) -> &S {
         unsafe { &*with_exposed_provenance::<S>(self.addr) }
     }
@@ -375,6 +408,7 @@ impl Entry {
     }
 
     /// Returns `true` if it contains a synchronous context.
+    #[inline]
     pub(crate) fn is_sync(&self) -> bool {
         matches!(self.monitor, Monitor::Sync(_))
     }
@@ -522,18 +556,21 @@ impl Entry {
     }
 
     /// The wait queue entry has been enqueued.
+    #[inline]
     pub(crate) fn enqueued(&self) {
         debug_assert!(!self.enqueued.load(Relaxed));
         self.enqueued.store(true, Release);
     }
 
     /// Returns `true` if the result has been finalized.
+    #[inline]
     pub(crate) fn result_finalized(&self) -> bool {
         let state = self.state.load(Acquire);
         state & Self::RESULT_FINALIZED == Self::RESULT_FINALIZED
     }
 
     /// Tries to get the result and acknowledges it.
+    #[inline]
     pub(crate) fn acknowledge_result_sync(&self) -> u8 {
         loop {
             if let Some(result) = self.try_acknowledge_result() {
@@ -544,6 +581,7 @@ impl Entry {
     }
 
     /// Tries to get the result and acknowledges it.
+    #[inline]
     pub(crate) fn try_acknowledge_result(&self) -> Option<u8> {
         let state = self.state.load(Acquire);
         if state & Self::RESULT_FINALIZED == Self::RESULT_FINALIZED {
@@ -555,6 +593,10 @@ impl Entry {
     }
 
     /// Prepares for dropping `self`.
+    ///
+    /// The method cannot be implemented in `drop` because `Miri` treats the drop method in a
+    /// way that other threads are not allowed to access the memory.
+    #[inline]
     fn prepare_drop(entry_ptr: *mut Self) {
         let this = unsafe { &mut *entry_ptr };
         let state = this.state.load(Acquire);
@@ -570,24 +612,6 @@ impl Entry {
         }
     }
 }
-
-impl Drop for WaitQueue {
-    #[inline]
-    fn drop(&mut self) {
-        let anchor_ptr = self.anchor_ptr().0;
-        let entry_ptr = Self::to_entry_ptr(anchor_ptr).cast_mut();
-        if entry_ptr.is_null() {
-            return;
-        }
-        unsafe {
-            Entry::prepare_drop(entry_ptr);
-            entry_ptr.drop_in_place();
-        }
-    }
-}
-
-unsafe impl Send for WaitQueue {}
-unsafe impl Sync for WaitQueue {}
 
 impl Future for PinnedEntry<'_> {
     type Output = u8;

@@ -25,6 +25,7 @@ pub(crate) trait SyncPrimitive: Sized {
     fn drop_wait_queue_entry(entry: &Entry);
 
     /// Converts a reference to `Self` into a memory address.
+    #[inline]
     fn addr(&self) -> usize {
         let self_ptr: *const Self = addr_of!(*self);
         self_ptr.expose_provenance()
