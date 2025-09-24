@@ -156,12 +156,7 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async(&self) -> bool {
-        let async_wait = pin!(WaitQueue::default());
-        async_wait
-            .as_ref()
-            .construct(self, Opcode::Exclusive, false);
-        self.acquire_async_with_internal::<_, true>(async_wait, || {})
-            .await
+        self.acquire_async_with_internal::<_, true>(|| {}).await
     }
 
     /// Acquires an exclusive lock asynchronously with a wait callback.
@@ -185,11 +180,7 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn lock_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
-        let async_wait = pin!(WaitQueue::default());
-        async_wait
-            .as_ref()
-            .construct(self, Opcode::Exclusive, false);
-        self.acquire_async_with_internal::<_, true>(async_wait, begin_wait)
+        self.acquire_async_with_internal::<_, true>(begin_wait)
             .await
     }
 
@@ -294,10 +285,7 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async(&self) -> bool {
-        let async_wait = pin!(WaitQueue::default());
-        async_wait.as_ref().construct(self, Opcode::Shared, false);
-        self.acquire_async_with_internal::<_, false>(async_wait, || ())
-            .await
+        self.acquire_async_with_internal::<_, false>(|| ()).await
     }
 
     /// Acquires a shared lock asynchronously with a wait callback.
@@ -321,9 +309,7 @@ impl Lock {
     /// ```
     #[inline]
     pub async fn share_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
-        let async_wait = pin!(WaitQueue::default());
-        async_wait.as_ref().construct(self, Opcode::Shared, false);
-        self.acquire_async_with_internal::<_, false>(async_wait, begin_wait)
+        self.acquire_async_with_internal::<_, false>(begin_wait)
             .await
     }
 
@@ -648,7 +634,6 @@ impl Lock {
     #[inline]
     async fn acquire_async_with_internal<F: FnOnce(), const EXCLUSIVE: bool>(
         &self,
-        wait_queue: Pin<&mut WaitQueue>,
         mut begin_wait: F,
     ) -> bool {
         loop {
@@ -665,16 +650,21 @@ impl Lock {
             debug_assert_eq!(result, Self::NOT_ACQUIRED);
             debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
+            let mode = if EXCLUSIVE {
+                Opcode::Exclusive
+            } else {
+                Opcode::Shared
+            };
+            let async_wait = pin!(WaitQueue::default());
+            async_wait.as_ref().construct(self, mode, false);
             if let Some(returned) =
-                self.try_push_wait_queue_entry(wait_queue.as_ref(), state, begin_wait)
+                self.try_push_wait_queue_entry(async_wait.as_ref(), state, begin_wait)
             {
                 begin_wait = returned;
                 continue;
             }
 
-            let wait_queue = wait_queue.as_ref();
-            let pinned_entry = PinnedEntry(Pin::new(wait_queue.entry()));
-            result = pinned_entry.await;
+            result = PinnedEntry(Pin::new(async_wait.entry())).await;
             debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
             return result == Self::ACQUIRED;
         }

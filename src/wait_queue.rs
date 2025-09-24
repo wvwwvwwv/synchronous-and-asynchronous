@@ -57,8 +57,11 @@ pub(crate) struct Entry {
     opcode: Opcode,
     /// Operation state.
     state: AtomicU16,
-    /// Indicates that the wait queue entry is enqueued.
-    enqueued: std::sync::atomic::AtomicBool, // `Loom` is too slow when it is added to modeling.
+    /// Indicates that the wait queue entry can be polled.
+    ///
+    /// If the flag is set, the `drop` method will automatically release unknowlingly acquired
+    /// resources.
+    pollable: std::sync::atomic::AtomicBool, // `Loom` is too slow when it is added to modeling.
     /// Monitors the result.
     monitor: Monitor,
     /// Context cleanup function when a [`WaitQueue`] is cancelled.
@@ -95,6 +98,11 @@ enum Monitor {
     Sync(SyncContext),
 }
 
+/// Static assertions.
+const _WAIT_QUEUE_ALIGN_ASSERT: () = assert!(align_of::<WaitQueue>() == 8);
+const _ENTRY_ALIGN_ASSERT: () = assert!(align_of::<Entry>() == 8);
+const _ENTRY_SIZE_ASSERT: () = assert!(size_of::<Entry>() <= WaitQueue::VIRTUAL_ALIGNMENT / 2);
+
 impl WaitQueue {
     /// Virtual alignment of the wait queue.
     #[cfg(not(feature = "loom"))]
@@ -114,14 +122,7 @@ impl WaitQueue {
     /// Mask to extract the memory address part from a `usize` value.
     pub(crate) const ADDR_MASK: usize = !(Self::LOCKED_FLAG | Self::DATA_MASK);
 
-    /// Static assertions.
-    const _ASSERT: () = {
-        assert!(align_of::<WaitQueue>() == 8);
-        assert!(align_of::<Entry>() == 8);
-        assert!(size_of::<Entry>() <= Self::VIRTUAL_ALIGNMENT / 2);
-    };
-
-    /// Creates a new [`WaitQueue`].
+    /// Constructs a new [`Entry`] in the [`WaitQueue`].
     pub(crate) fn construct<S: SyncPrimitive>(
         self: Pin<&Self>,
         sync_primitive: &S,
@@ -151,6 +152,7 @@ impl WaitQueue {
         };
         unsafe {
             if had_entry {
+                debug_assert!(!(*entry_ptr).pollable.load(Relaxed));
                 (*entry_ptr).prev_entry_ptr.store(null_mut(), Relaxed);
                 (*entry_ptr).opcode = opcode;
                 (*entry_ptr).monitor = monitor;
@@ -161,7 +163,7 @@ impl WaitQueue {
                     prev_entry_ptr: AtomicPtr::new(null_mut()),
                     opcode,
                     state: AtomicU16::new(0),
-                    enqueued: std::sync::atomic::AtomicBool::new(false),
+                    pollable: std::sync::atomic::AtomicBool::new(false),
                     monitor,
                     drop_callback: S::drop_wait_queue_entry,
                     addr: sync_primitive.addr(),
@@ -175,14 +177,14 @@ impl WaitQueue {
         }
     }
 
-    /// Checks whether the wait queue entry has been enqueued.
+    /// Checks whether the wait queue entry can be polled.
     #[inline]
-    pub(crate) fn is_enqueued(&self) -> bool {
+    pub(crate) fn is_pollable(&self) -> bool {
         let entry_ptr = Self::to_entry_ptr(self.anchor_ptr().0);
         if entry_ptr.is_null() {
             false
         } else {
-            unsafe { (*entry_ptr).enqueued.load(Acquire) }
+            unsafe { (*entry_ptr).pollable.load(Acquire) }
         }
     }
 
@@ -439,7 +441,7 @@ impl Entry {
 
     /// Sets the result to the entry.
     pub(crate) fn set_result(&self, result: u8) {
-        self.enqueued.store(true, Release);
+        self.pollable.store(true, Release);
         let mut state = self.state.load(Acquire);
         loop {
             debug_assert_eq!(state & Self::RESULT_SET, 0);
@@ -489,7 +491,7 @@ impl Entry {
             return Poll::Ready(Self::ERROR_WRONG_MODE);
         };
 
-        if let Some(result) = self.try_acknowledge_result() {
+        if let Some(result) = self.try_consume_result() {
             return Poll::Ready(result);
         }
 
@@ -497,7 +499,7 @@ impl Entry {
         let state = self.state.load(Acquire);
         if state & Self::RESULT_SET == Self::RESULT_SET {
             // No need to install the waker.
-            if let Some(result) = self.try_acknowledge_result() {
+            if let Some(result) = self.try_consume_result() {
                 return Poll::Ready(result);
             }
         } else if state & Self::WAKER_SET == Self::WAKER_SET {
@@ -537,7 +539,7 @@ impl Entry {
         };
 
         loop {
-            if let Some(result) = self.try_acknowledge_result() {
+            if let Some(result) = self.try_consume_result() {
                 return result;
             }
 
@@ -545,7 +547,7 @@ impl Entry {
             let state = self.state.load(Acquire);
             if state & Self::RESULT_SET == Self::RESULT_SET {
                 // No need to install the thread.
-                if let Some(result) = self.try_acknowledge_result() {
+                if let Some(result) = self.try_consume_result() {
                     return result;
                 }
             } else if state & Self::WAKER_SET == Self::WAKER_SET {
@@ -580,10 +582,10 @@ impl Entry {
         }
     }
 
-    /// The wait queue entry has been enqueued.
+    /// The wait queue entry has been enqueued and can be polled.
     #[inline]
-    pub(crate) fn set_enqueued(&self) {
-        self.enqueued.store(true, Release);
+    pub(crate) fn set_pollable(&self) {
+        self.pollable.store(true, Release);
     }
 
     /// Returns `true` if the result has been finalized.
@@ -597,7 +599,7 @@ impl Entry {
     #[inline]
     pub(crate) fn acknowledge_result_sync(&self) -> u8 {
         loop {
-            if let Some(result) = self.try_acknowledge_result() {
+            if let Some(result) = self.try_consume_result() {
                 return result;
             }
             yield_now();
@@ -606,12 +608,13 @@ impl Entry {
 
     /// Tries to get the result and acknowledges it.
     #[inline]
-    pub(crate) fn try_acknowledge_result(&self) -> Option<u8> {
+    pub(crate) fn try_consume_result(&self) -> Option<u8> {
         let state = self.state.load(Acquire);
         if state & Self::RESULT_FINALIZED == Self::RESULT_FINALIZED {
+            // The result is consumed, so the wait queue entry is no longer pollable.
             debug_assert_ne!(state & Self::RESULT_SET, 0);
             self.state.store(0, Release);
-            self.enqueued.store(false, Release);
+            self.pollable.store(false, Release);
             return u8::try_from(state & ((1_u16 << u8::BITS) - 1)).ok();
         }
         None
@@ -624,13 +627,13 @@ impl Entry {
     #[inline]
     fn prepare_drop(entry_ptr: *mut Self) {
         let this = unsafe { &mut *entry_ptr };
-        // The wait queue entry is still in the wait queue.
+        // The wait queue entry is pollable and the result is not consumed.
         //
-        // The wait queue entry owner will acquire the resource or has already acquired it without
+        // The wait queue entry owner may acquire the resource or has already acquired it without
         // knowing it, therefore the resource needs to be released.
-        if this.enqueued.load(Acquire) {
+        if this.pollable.load(Acquire) {
             (this.drop_callback)(this);
-            this.enqueued.store(false, Release);
+            this.pollable.store(false, Release);
         }
     }
 }

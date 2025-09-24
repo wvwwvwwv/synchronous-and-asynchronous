@@ -138,11 +138,7 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async(&self) {
-        let async_wait = pin!(WaitQueue::default());
-        async_wait
-            .as_ref()
-            .construct(self, Opcode::Semaphore(1), false);
-        self.acquire_async_with_internal(async_wait, 1, || {}).await;
+        self.acquire_async_with_internal(1, || {}).await;
     }
 
     /// Gets a permit from the semaphore asynchronously with a wait callback.
@@ -166,12 +162,7 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async_with<F: FnOnce()>(&self, begin_wait: F) {
-        let async_wait = pin!(WaitQueue::default());
-        async_wait
-            .as_ref()
-            .construct(self, Opcode::Semaphore(1), false);
-        self.acquire_async_with_internal(async_wait, 1, begin_wait)
-            .await;
+        self.acquire_async_with_internal(1, begin_wait).await;
     }
 
     /// Gets a permit from the semaphore synchronously.
@@ -252,13 +243,7 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_many_async(&self, count: usize) -> bool {
-        let async_wait = pin!(WaitQueue::default());
-        #[allow(clippy::cast_possible_truncation)]
-        async_wait
-            .as_ref()
-            .construct(self, Opcode::Semaphore(count as u8), false);
-        self.acquire_async_with_internal(async_wait, count, || {})
-            .await
+        self.acquire_async_with_internal(count, || {}).await
     }
 
     /// Gets multiple permits from the semaphore asynchronously with a wait callback.
@@ -283,13 +268,7 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) -> bool {
-        let async_wait = pin!(WaitQueue::default());
-        #[allow(clippy::cast_possible_truncation)]
-        async_wait
-            .as_ref()
-            .construct(self, Opcode::Semaphore(count as u8), false);
-        self.acquire_async_with_internal(async_wait, count, begin_wait)
-            .await
+        self.acquire_async_with_internal(count, begin_wait).await
     }
 
     /// Gets multiple permits from the semaphore synchronously.
@@ -500,7 +479,6 @@ impl Semaphore {
     #[inline]
     async fn acquire_async_with_internal<F: FnOnce()>(
         &self,
-        wait_queue: Pin<&mut WaitQueue>,
         count: usize,
         mut begin_wait: F,
     ) -> bool {
@@ -517,16 +495,18 @@ impl Semaphore {
             }
             debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
+            let async_wait = pin!(WaitQueue::default());
+            async_wait
+                .as_ref()
+                .construct(self, Opcode::Semaphore(count), false);
             if let Some(returned) =
-                self.try_push_wait_queue_entry(wait_queue.as_ref(), state, begin_wait)
+                self.try_push_wait_queue_entry(async_wait.as_ref(), state, begin_wait)
             {
                 begin_wait = returned;
                 continue;
             }
 
-            let wait_queue = wait_queue.as_ref();
-            let pinned_entry = PinnedEntry(Pin::new(wait_queue.entry()));
-            pinned_entry.await;
+            PinnedEntry(Pin::new(async_wait.entry())).await;
             return true;
         }
     }

@@ -56,7 +56,7 @@ pub(crate) trait SyncPrimitive: Sized {
             .is_ok()
         {
             // The entry cannot be dropped until the result is acknowledged.
-            wait_queue.entry().set_enqueued();
+            wait_queue.entry().set_pollable();
             begin_wait();
             None
         } else {

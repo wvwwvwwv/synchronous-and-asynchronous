@@ -1,5 +1,9 @@
 # Changelog
 
+4.3.2
+
+* Minor `Future` size reduction.
+
 4.3.1
 
 * Fix a bug in `Pager::try_poll`.

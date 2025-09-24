@@ -62,11 +62,12 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// assert!(gate.register_pager(&mut pinned_pager, false));
     /// assert!(pinned_pager.is_registered());
     ///
-    /// assert_eq!(gate.open().1, 1);
+    /// assert!(!gate.register_pager(&mut pinned_pager, false));
+    /// assert!(pinned_pager.is_registered());
     /// ```
     #[inline]
     pub fn is_registered(self: &mut Pin<&mut Pager<'s, S>>) -> bool {
-        self.wait_queue().is_enqueued()
+        self.wait_queue().is_pollable()
     }
 
     /// Waits for the desired resource to become available asynchronously.
@@ -165,7 +166,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
         if !self.is_registered() {
             return S::to_result(0, Some(Error::NotRegistered));
         }
-        if let Some(result) = self.wait_queue().entry().try_acknowledge_result() {
+        if let Some(result) = self.wait_queue().entry().try_consume_result() {
             S::to_result(result, None)
         } else {
             S::to_result(0, Some(Error::NotReady))

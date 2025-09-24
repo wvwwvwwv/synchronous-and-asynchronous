@@ -572,7 +572,7 @@ impl SyncPrimitive for Gate {
 
     #[inline]
     fn drop_wait_queue_entry(entry: &Entry) {
-        if entry.try_acknowledge_result().is_none() {
+        if entry.try_consume_result().is_none() {
             let this: &Self = entry.sync_primitive_ref();
             this.wake_all(None, Some(Error::SpuriousFailure));
             entry.acknowledge_result_sync();

@@ -9,7 +9,7 @@ use crate::{Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
-    let limit = 220;
+    let limit = 196;
     let lock = Lock::default();
 
     let lock_fut = &lock.lock_async();
