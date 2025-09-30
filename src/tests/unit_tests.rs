@@ -490,6 +490,61 @@ async fn lock_pager() {
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn lock_pager_wait() {
+    let num_tasks = 8;
+    let num_iters = 64;
+    let lock = Arc::new(Lock::default());
+
+    let mut threads = Vec::new();
+    let mut tasks = Vec::new();
+    for i in 0..num_tasks {
+        let lock = lock.clone();
+        if i % 4 == 0 {
+            tasks.push(tokio::spawn(async move {
+                let mut pinned_pager = pin!(Pager::default());
+                for _ in 0..num_iters {
+                    let mode = if num_iters % 7 == 0 {
+                        lock::Mode::Exclusive
+                    } else {
+                        lock::Mode::Shared
+                    };
+                    lock.register_pager(&mut pinned_pager, mode, false);
+                    match pinned_pager.poll_async().await {
+                        Ok(true) => {
+                            if mode == lock::Mode::Exclusive {
+                                lock.release_lock();
+                            } else {
+                                lock.release_share();
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }));
+        } else {
+            threads.push(thread::spawn(move || {
+                let mut pinned_pager = pin!(Pager::default());
+                for _ in 0..num_iters {
+                    lock.register_pager(&mut pinned_pager, lock::Mode::Wait, true);
+                    assert!(pinned_pager.poll_sync().is_ok());
+                }
+            }));
+        }
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert!(lock.try_lock());
+    assert!(lock.release_lock());
+}
+
+#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn semaphore_async() {
     let num_tasks = 64;
     let check = Arc::new(AtomicUsize::new(0));

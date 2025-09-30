@@ -36,6 +36,8 @@ pub enum Mode {
     Exclusive,
     /// Shared lock.
     Shared,
+    /// Waits for the [`Lock`] to be free or poisoned.
+    Wait,
 }
 
 impl Lock {
@@ -432,6 +434,7 @@ impl Lock {
         let opcode = match mode {
             Mode::Exclusive => Opcode::Exclusive,
             Mode::Shared => Opcode::Shared,
+            Mode::Wait => Opcode::Wait,
         };
 
         pager.wait_queue().construct(self, opcode, is_sync);
@@ -440,6 +443,17 @@ impl Lock {
             let (result, state) = match mode {
                 Mode::Exclusive => self.try_lock_internal(),
                 Mode::Shared => self.try_share_internal(),
+                Mode::Wait => {
+                    let state = self.state.load(Acquire);
+                    let result = if state == usize::from(Self::POISONED) {
+                        Self::POISONED
+                    } else if (state & WaitQueue::DATA_MASK) == 0 {
+                        Self::ACQUIRED
+                    } else {
+                        Self::NOT_ACQUIRED
+                    };
+                    (result, state)
+                }
             };
             if result == Self::ACQUIRED || result == Self::POISONED {
                 pager.wait_queue().entry().set_result(result);

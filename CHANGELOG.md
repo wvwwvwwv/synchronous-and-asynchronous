@@ -1,5 +1,9 @@
 # Changelog
 
+4.4.0
+
+* Add `lock::Mode::Wait`.
+
 4.3.2
 
 * Minor `Future` size reduction.
