@@ -68,13 +68,13 @@ pub(crate) trait SyncPrimitive: Sized {
     fn wait_resources_sync<F: FnOnce()>(
         &self,
         state: usize,
-        mode: Opcode,
+        opcode: Opcode,
         begin_wait: F,
     ) -> Result<u8, F> {
         debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
 
         let pinned_wait_queue = pin!(WaitQueue::default());
-        pinned_wait_queue.as_ref().construct(self, mode, true);
+        pinned_wait_queue.as_ref().construct(self, opcode, true);
         if let Some(returned) =
             self.try_push_wait_queue_entry(pinned_wait_queue.as_ref(), state, begin_wait)
         {
@@ -86,15 +86,15 @@ pub(crate) trait SyncPrimitive: Sized {
     /// Releases the resource represented by the supplied operation mode.
     ///
     /// Returns `false` if the resource cannot be released.
-    fn release_loop(&self, mut state: usize, mode: Opcode) -> bool {
-        while mode.can_release(state) {
+    fn release_loop(&self, mut state: usize, opcode: Opcode) -> bool {
+        while opcode.can_release(state) {
             if state & WaitQueue::ADDR_MASK == 0
                 || state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG
             {
                 // Release the resource in-place.
                 match self.state().compare_exchange(
                     state,
-                    state - mode.release_count(),
+                    state - opcode.release_count(),
                     Release,
                     Relaxed,
                 ) {
@@ -103,7 +103,7 @@ pub(crate) trait SyncPrimitive: Sized {
                 }
             } else {
                 // The wait queue is not empty and is not being processed.
-                let next_state = (state | WaitQueue::LOCKED_FLAG) - mode.release_count();
+                let next_state = (state | WaitQueue::LOCKED_FLAG) - opcode.release_count();
                 if let Err(new_state) = self
                     .state()
                     .compare_exchange(state, next_state, AcqRel, Relaxed)

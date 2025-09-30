@@ -29,12 +29,12 @@ pub struct Lock {
     state: AtomicUsize,
 }
 
-/// Locking mode, either exclusive or shared.
+/// Operation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mode {
-    /// Exclusive lock.
+    /// Acquires an exclusive lock.
     Exclusive,
-    /// Shared lock.
+    /// Acquires a shared lock.
     Shared,
     /// Waits for the [`Lock`] to be free or poisoned.
     Wait,

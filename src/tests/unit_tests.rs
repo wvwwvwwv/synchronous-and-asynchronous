@@ -540,7 +540,11 @@ async fn lock_pager_wait() {
     }
 
     assert!(lock.try_lock());
-    assert!(lock.release_lock());
+
+    let mut pinned_pager = pin!(Pager::default());
+    assert!(lock.register_pager(&mut pinned_pager, lock::Mode::Wait, false));
+    assert!(lock.poison_lock());
+    assert_eq!(pinned_pager.try_poll(), Ok(false));
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
