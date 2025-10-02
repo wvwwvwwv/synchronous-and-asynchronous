@@ -488,9 +488,36 @@ async fn lock_pager() {
     assert_eq!(check.load(Relaxed), num_iters * num_tasks);
 }
 
+#[test]
+fn lock_pager_wait() {
+    let lock = Lock::default();
+
+    // Wait for shared locks to be released.
+    assert!(lock.try_lock());
+    let mut pinned_pager_1 = pin!(Pager::default());
+    let mut pinned_pager_2 = pin!(Pager::default());
+    let mut pinned_pager_3 = pin!(Pager::default());
+    assert!(lock.register_pager(&mut pinned_pager_1, lock::Mode::Shared, false));
+    assert!(lock.register_pager(&mut pinned_pager_2, lock::Mode::WaitExclusive, false));
+    assert!(lock.register_pager(&mut pinned_pager_3, lock::Mode::Exclusive, false));
+    assert!(lock.release_lock());
+    assert_eq!(pinned_pager_1.try_poll(), Ok(true));
+    assert!(pinned_pager_2.try_poll().is_err());
+    assert!(pinned_pager_3.try_poll().is_err());
+
+    assert!(lock.release_share());
+    assert_eq!(pinned_pager_2.try_poll(), Ok(true));
+    assert_eq!(pinned_pager_3.try_poll(), Ok(true));
+
+    assert!(lock.register_pager(&mut pinned_pager_2, lock::Mode::WaitShared, false));
+    assert!(pinned_pager_2.try_poll().is_err());
+    assert!(lock.poison_lock());
+    assert_eq!(pinned_pager_2.try_poll(), Ok(false));
+}
+
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-async fn lock_pager_wait() {
+async fn lock_pager_wait_parallel() {
     let num_tasks = 8;
     let num_iters = 64;
     let lock = Arc::new(Lock::default());
@@ -525,7 +552,7 @@ async fn lock_pager_wait() {
             threads.push(thread::spawn(move || {
                 let mut pinned_pager = pin!(Pager::default());
                 for _ in 0..num_iters {
-                    lock.register_pager(&mut pinned_pager, lock::Mode::Wait, true);
+                    lock.register_pager(&mut pinned_pager, lock::Mode::WaitShared, true);
                     assert!(pinned_pager.poll_sync().is_ok());
                 }
             }));
@@ -538,13 +565,6 @@ async fn lock_pager_wait() {
     for task in tasks {
         task.await.unwrap();
     }
-
-    assert!(lock.try_lock());
-
-    let mut pinned_pager = pin!(Pager::default());
-    assert!(lock.register_pager(&mut pinned_pager, lock::Mode::Wait, false));
-    assert!(lock.poison_lock());
-    assert_eq!(pinned_pager.try_poll(), Ok(false));
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]

@@ -94,7 +94,7 @@ pub(crate) trait SyncPrimitive: Sized {
                 // Release the resource in-place.
                 match self.state().compare_exchange(
                     state,
-                    state - opcode.release_count(),
+                    state - opcode.acquired_count(),
                     Release,
                     Relaxed,
                 ) {
@@ -103,7 +103,7 @@ pub(crate) trait SyncPrimitive: Sized {
                 }
             } else {
                 // The wait queue is not empty and is not being processed.
-                let next_state = (state | WaitQueue::LOCKED_FLAG) - opcode.release_count();
+                let next_state = (state | WaitQueue::LOCKED_FLAG) - opcode.acquired_count();
                 if let Err(new_state) = self
                     .state()
                     .compare_exchange(state, next_state, AcqRel, Relaxed)
@@ -144,13 +144,15 @@ pub(crate) trait SyncPrimitive: Sized {
             let mut reset_failed = false;
 
             Entry::iter_backward(head_entry_ptr, |entry, prev_entry| {
-                let desired = entry.opcode().release_count();
+                let desired = entry.opcode().desired_count();
                 if data + transferred == 0
                     || data + transferred + desired <= Self::max_shared_owners()
                 {
                     // The entry can inherit ownership.
+                    let acquired = entry.opcode().acquired_count();
+                    debug_assert!(acquired <= desired);
                     if prev_entry.is_some() {
-                        transferred += desired;
+                        transferred += acquired;
                         resolved_entry_ptr = Entry::ref_to_ptr(entry);
                         false
                     } else {
@@ -158,7 +160,7 @@ pub(crate) trait SyncPrimitive: Sized {
                         debug_assert_eq!(tail_entry_ptr, addr_of!(*entry));
                         if self
                             .state()
-                            .compare_exchange(state, data + transferred + desired, AcqRel, Acquire)
+                            .compare_exchange(state, data + transferred + acquired, AcqRel, Acquire)
                             .is_err()
                         {
                             // This entry will be processed on the next retry.

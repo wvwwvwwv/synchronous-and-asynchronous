@@ -37,7 +37,15 @@ pub enum Mode {
     /// Acquires a shared lock.
     Shared,
     /// Waits for the [`Lock`] to be free or poisoned.
-    Wait,
+    ///
+    /// [`Self::WaitExclusive`], [`Self::WaitShared`], [`Lock::try_lock`], and [`Lock::try_share`]
+    /// provide a way to bypass the fair queueing mechanism without spinning.
+    WaitExclusive,
+    /// Waits for a shared lock to be available or the [`Lock`] to be poisoned.
+    ///
+    /// If a [`Self::WaitExclusive`] entry is in front of a [`Self::WaitShared`] entry, the
+    /// [`Self::WaitShared`] entry has to wait until the [`Self::WaitExclusive`] entry is processed.
+    WaitShared,
 }
 
 impl Lock {
@@ -434,7 +442,8 @@ impl Lock {
         let opcode = match mode {
             Mode::Exclusive => Opcode::Exclusive,
             Mode::Shared => Opcode::Shared,
-            Mode::Wait => Opcode::Wait,
+            Mode::WaitExclusive => Opcode::Wait(u8::try_from(WaitQueue::DATA_MASK).unwrap_or(0)),
+            Mode::WaitShared => Opcode::Wait(1),
         };
 
         pager.wait_queue().construct(self, opcode, is_sync);
@@ -443,11 +452,15 @@ impl Lock {
             let (result, state) = match mode {
                 Mode::Exclusive => self.try_lock_internal(),
                 Mode::Shared => self.try_share_internal(),
-                Mode::Wait => {
+                Mode::WaitExclusive | Mode::WaitShared => {
                     let state = self.state.load(Acquire);
                     let result = if state == usize::from(Self::POISONED) {
                         Self::POISONED
-                    } else if (state & WaitQueue::DATA_MASK) == 0 {
+                    } else if (mode == Mode::WaitExclusive && (state & WaitQueue::DATA_MASK) == 0)
+                        || (mode == Mode::WaitShared
+                            && (state & WaitQueue::DATA_MASK) < Self::MAX_SHARED_OWNERS)
+                    {
+                        // If an available lock is available, return immediately.
                         Self::ACQUIRED
                     } else {
                         Self::NOT_ACQUIRED

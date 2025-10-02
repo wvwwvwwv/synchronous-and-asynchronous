@@ -11,8 +11,8 @@ pub(crate) enum Opcode {
     Shared,
     /// Acquires semaphores.
     Semaphore(u8),
-    /// Waits for a condition without trying to acquire a resource.
-    Wait,
+    /// Waits until the desired resources are available.
+    Wait(u8),
 }
 
 impl Opcode {
@@ -33,23 +33,37 @@ impl Opcode {
                 let count = count as usize;
                 data >= count
             }
-            Opcode::Wait => true,
+            Opcode::Wait(_) => true,
+        }
+    }
+
+    /// Converts the operation mode into a `usize` value representing the desired resources.
+    #[inline]
+    pub(crate) const fn desired_count(self) -> usize {
+        match self {
+            Opcode::Exclusive => WaitQueue::DATA_MASK,
+            Opcode::Shared => 1,
+            Opcode::Semaphore(count) | Opcode::Wait(count) => {
+                let count = count as usize;
+                debug_assert!(count < WaitQueue::LOCKED_FLAG);
+                count
+            }
         }
     }
 
     /// Converts the operation mode into a `usize` value representing the resource held by the
     /// corresponding synchronization primitive.
     #[inline]
-    pub(crate) const fn release_count(self) -> usize {
+    pub(crate) const fn acquired_count(self) -> usize {
         match self {
             Opcode::Exclusive => WaitQueue::DATA_MASK,
             Opcode::Shared => 1,
             Opcode::Semaphore(count) => {
                 let count = count as usize;
-                debug_assert!(count <= WaitQueue::LOCKED_FLAG);
+                debug_assert!(count < WaitQueue::LOCKED_FLAG);
                 count
             }
-            Opcode::Wait => 0,
+            Opcode::Wait(_) => 0,
         }
     }
 }

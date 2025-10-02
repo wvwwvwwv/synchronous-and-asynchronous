@@ -294,7 +294,7 @@ impl Gate {
         let mut pinned_pager = pin!(Pager::default());
         pinned_pager
             .wait_queue()
-            .construct(self, Opcode::Wait, false);
+            .construct(self, Opcode::Wait(0), false);
         self.push_wait_queue_entry(&mut pinned_pager, || {});
         pinned_pager.poll_async().await
     }
@@ -329,7 +329,7 @@ impl Gate {
         let mut pinned_pager = pin!(Pager::default());
         pinned_pager
             .wait_queue()
-            .construct(self, Opcode::Wait, false);
+            .construct(self, Opcode::Wait(0), false);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_async().await
     }
@@ -424,7 +424,7 @@ impl Gate {
         let mut pinned_pager = pin!(Pager::default());
         pinned_pager
             .wait_queue()
-            .construct(self, Opcode::Wait, true);
+            .construct(self, Opcode::Wait(0), true);
         self.push_wait_queue_entry(&mut pinned_pager, wait_callback);
         pinned_pager.poll_sync()
     }
@@ -471,7 +471,7 @@ impl Gate {
         if pager.is_registered() {
             return false;
         }
-        pager.wait_queue().construct(self, Opcode::Wait, is_sync);
+        pager.wait_queue().construct(self, Opcode::Wait(0), is_sync);
         self.push_wait_queue_entry(pager, || ());
         true
     }
