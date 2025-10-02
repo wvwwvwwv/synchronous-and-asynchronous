@@ -492,7 +492,6 @@ async fn lock_pager() {
 fn lock_pager_wait() {
     let lock = Lock::default();
 
-    // Wait for shared locks to be released.
     assert!(lock.try_lock());
     let mut pinned_pager_1 = pin!(Pager::default());
     let mut pinned_pager_2 = pin!(Pager::default());

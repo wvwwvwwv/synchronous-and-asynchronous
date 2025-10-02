@@ -1,6 +1,6 @@
 # Changelog
 
-4.5.0
+5.0.0
 
 * Separate `lock::Mode::Wait` into `WaitExclusive` and `WaitShared`.
 
