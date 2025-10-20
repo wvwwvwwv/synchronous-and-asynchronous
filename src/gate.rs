@@ -363,10 +363,10 @@ impl Gate {
     ///     assert_eq!(gate_clone.enter_sync(), Ok(State::Controlled));
     /// });
     ///
-    /// let mut cnt = 0;
-    /// while cnt != 2 {
+    /// let mut count = 0;
+    /// while count != 2 {
     ///     if let Ok(n) = gate.permit() {
-    ///         cnt += n;
+    ///         count += n;
     ///     }
     /// }
     ///
@@ -409,10 +409,10 @@ impl Gate {
     ///     assert_eq!(gate_clone.enter_sync_with(|| wait = true), Ok(State::Controlled));
     /// });
     ///
-    /// let mut cnt = 0;
-    /// while cnt != 2 {
+    /// let mut count = 0;
+    /// while count != 2 {
     ///     if let Ok(n) = gate.permit() {
-    ///         cnt += n;
+    ///         count += n;
     ///     }
     /// }
     ///

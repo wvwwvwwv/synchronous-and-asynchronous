@@ -46,10 +46,10 @@ fn gate() {
         }));
     }
 
-    let mut cnt = 0;
-    while cnt != 8 {
+    let mut count = 0;
+    while count != 8 {
         if let Ok(n) = gate.permit() {
-            cnt += n;
+            count += n;
         }
     }
 

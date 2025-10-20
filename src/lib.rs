@@ -1,6 +1,9 @@
 #![deny(missing_docs, clippy::all, clippy::pedantic)]
 #![doc = include_str!("../README.md")]
 
+pub mod barrier;
+pub use barrier::Barrier;
+
 pub mod gate;
 pub use gate::Gate;
 

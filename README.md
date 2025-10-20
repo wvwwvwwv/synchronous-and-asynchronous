@@ -87,10 +87,10 @@ for _ in 0..4 {
     }));
 }
 
-let mut cnt = 0;
-while cnt != 4 {
+let mut count = 0;
+while count != 4 {
     if let Ok(n) = gate.permit() {
-        cnt += n;
+        count += n;
     }
 }
 
