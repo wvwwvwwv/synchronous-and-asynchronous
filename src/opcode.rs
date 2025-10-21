@@ -9,6 +9,10 @@ pub(crate) enum Opcode {
     Exclusive,
     /// Acquires shared ownership.
     Shared,
+    /// Barrier operation.
+    ///
+    /// The boolean flag indicates whether the operation is wait-only.
+    Barrier(bool),
     /// Acquires semaphores.
     Semaphore(u8),
     /// Waits until the desired resources are available.
@@ -33,7 +37,7 @@ impl Opcode {
                 let count = count as usize;
                 data >= count
             }
-            Opcode::Wait(_) => true,
+            Opcode::Barrier(_) | Opcode::Wait(_) => true,
         }
     }
 
@@ -43,6 +47,13 @@ impl Opcode {
         match self {
             Opcode::Exclusive => WaitQueue::DATA_MASK,
             Opcode::Shared => 1,
+            Opcode::Barrier(wait_only) => {
+                if wait_only {
+                    0
+                } else {
+                    1
+                }
+            }
             Opcode::Semaphore(count) | Opcode::Wait(count) => {
                 let count = count as usize;
                 debug_assert!(count < WaitQueue::LOCKED_FLAG);
@@ -63,7 +74,7 @@ impl Opcode {
                 debug_assert!(count < WaitQueue::LOCKED_FLAG);
                 count
             }
-            Opcode::Wait(_) => 0,
+            Opcode::Barrier(_) | Opcode::Wait(_) => 0,
         }
     }
 }

@@ -4,12 +4,14 @@
 ![Crates.io](https://img.shields.io/crates/l/saa)
 ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/wvwwvwwv/synchronous-and-asynchronous/saa.yml?branch=main)
 
-Low-level synchronization primitives providing both asynchronous and synchronous interfaces.
+Word-sized low-level synchronization primitives providing both asynchronous and synchronous interfaces.
 
 ## Features
 
+- No heap allocation.
 - No hidden global variables.
 - Provides both asynchronous and synchronous interfaces.
+- Small memory footprint.
 - [`Loom`](https://github.com/tokio-rs/loom) support: `features = ["loom"]`.
 
 ## Lock
@@ -35,6 +37,34 @@ async {
     lock.share_async();
     assert!(lock.release_share());
 };
+```
+
+## Barrier
+
+`saa::Barrier` is a synchronization primitive to enable a number of tasks to start execution at the same time.
+
+```rust
+use std::sync::Arc;
+use std::thread;
+
+use saa::Barrier;
+
+let barrier = Arc::new(Barrier::with_count(8));
+
+let mut threads = Vec::new();
+
+for _ in 0..8 {
+    let barrier = barrier.clone();
+    threads.push(thread::spawn(move || {
+        for _ in 0..4 {
+            barrier.wait_sync();
+        }
+    }));
+}
+
+for thread in threads {
+    thread.join().unwrap();
+}
 ```
 
 ## Semaphore
@@ -87,10 +117,10 @@ for _ in 0..4 {
     }));
 }
 
-let mut cnt = 0;
-while cnt != 4 {
+let mut count = 0;
+while count != 4 {
     if let Ok(n) = gate.permit() {
-        cnt += n;
+        count += n;
     }
 }
 

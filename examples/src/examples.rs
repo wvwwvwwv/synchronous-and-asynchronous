@@ -4,7 +4,7 @@ use std::thread;
 
 use saa::gate::{Error, State};
 use saa::lock::Mode;
-use saa::{Gate, Lock, Pager, Semaphore};
+use saa::{Barrier, Gate, Lock, Pager, Semaphore};
 
 #[test]
 fn lock() {
@@ -17,6 +17,26 @@ fn lock() {
 
     assert!(!lock.release_share());
     assert!(lock.release_lock());
+}
+
+#[test]
+fn barrier() {
+    let barrier = Arc::new(Barrier::with_count(8));
+
+    let mut threads = Vec::new();
+
+    for _ in 0..8 {
+        let barrier = barrier.clone();
+        threads.push(thread::spawn(move || {
+            for _ in 0..4 {
+                barrier.wait_sync();
+            }
+        }));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
 }
 
 #[test]
@@ -46,10 +66,10 @@ fn gate() {
         }));
     }
 
-    let mut cnt = 0;
-    while cnt != 8 {
+    let mut count = 0;
+    while count != 8 {
         if let Ok(n) = gate.permit() {
-            cnt += n;
+            count += n;
         }
     }
 
