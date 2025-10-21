@@ -52,7 +52,26 @@ impl Barrier {
         }
     }
 
+    /// Returns the current count of tasks to block.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Barrier;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let barrier = Barrier::with_count(1);
+    ///
+    /// assert_eq!(barrier.count(), 1);
+    /// ```
+    #[inline]
+    pub fn count(&self) -> usize {
+        self.state.load(Relaxed) & WaitQueue::DATA_MASK
+    }
+
     /// Waits until a sufficient number of tasks have reached the barrier.
+    ///
+    /// Returns `true` if the task was the last one to reach the barrier.
     ///
     /// # Examples
     ///
@@ -73,7 +92,8 @@ impl Barrier {
 
     /// Waits until a sufficient number of tasks have reached the barrier.
     ///
-    /// The callback is invoked when the task starts waiting.
+    /// Returns `true` if the task was the last one to reach the barrier. The callback is invoked
+    /// when the task starts waiting.
     ///
     /// # Examples
     ///
@@ -108,6 +128,8 @@ impl Barrier {
 
     /// Waits until a sufficient number of tasks have reached the barrier.
     ///
+    /// Returns `true` if the task was the last one to reach the barrier.
+    ///
     /// # Examples
     ///
     /// ```
@@ -125,7 +147,8 @@ impl Barrier {
 
     /// Waits until a sufficient number of tasks have reached the barrier.
     ///
-    /// The callback is invoked when the task starts waiting for permits.
+    /// Returns `true` if the task was the last one to reach the barrier. The callback is invoked
+    /// when the task starts waiting.
     ///
     /// # Examples
     ///
@@ -245,12 +268,12 @@ impl Barrier {
 impl fmt::Debug for Barrier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.load(Relaxed);
-        let count = state & WaitQueue::DATA_MASK;
+        let counter = state & WaitQueue::DATA_MASK;
         let wait_queue_being_processed = state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG;
         let wait_queue_tail_addr = state & WaitQueue::ADDR_MASK;
         f.debug_struct("WaitQueue")
             .field("state", &state)
-            .field("count", &count)
+            .field("counter", &counter)
             .field("wait_queue_being_processed", &wait_queue_being_processed)
             .field("wait_queue_tail_addr", &wait_queue_tail_addr)
             .finish()

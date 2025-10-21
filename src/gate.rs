@@ -301,7 +301,8 @@ impl Gate {
 
     /// Enters the [`Gate`] asynchronously with a wait callback.
     ///
-    /// Returns the current state of the [`Gate`].
+    /// Returns the current state of the [`Gate`]. The callback is invoked when the task starts
+    /// waiting.
     ///
     /// # Errors
     ///
@@ -380,8 +381,8 @@ impl Gate {
 
     /// Enters the [`Gate`] synchronously with a wait callback.
     ///
-    /// Returns the current state of the [`Gate`].
-    ///
+    /// Returns the current state of the [`Gate`]. The callback is invoked when the task starts
+    /// waiting.
     /// # Errors
     ///
     /// Returns an [`Error`] if it failed to enter the [`Gate`].

@@ -664,7 +664,7 @@ fn semaphore_sync_wait_callback() {
     } else {
         Semaphore::MAX_PERMITS
     };
-    let barrier = Arc::new(Barrier::with_count(num_threads + 1));
+    let barrier = Arc::new(Barrier::with_count(num_threads));
     let semaphore = Arc::new(Semaphore::default());
 
     assert!(semaphore.acquire_many_sync(Semaphore::MAX_PERMITS));
@@ -676,15 +676,15 @@ fn semaphore_sync_wait_callback() {
         threads.push(thread::spawn(move || {
             let result = if i % 7 == 3 {
                 semaphore.acquire_sync_with(|| {
-                    if barrier.wait_sync() {
-                        assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
+                    if i != 0 {
+                        barrier.wait_sync();
                     }
                 });
                 semaphore.release()
             } else {
                 semaphore.acquire_many_sync_with(3, || {
-                    if barrier.wait_sync() {
-                        assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
+                    if i != 0 {
+                        barrier.wait_sync();
                     }
                 });
                 semaphore.release_many(3)
@@ -692,6 +692,9 @@ fn semaphore_sync_wait_callback() {
             assert!(result);
         }));
     }
+
+    barrier.wait_sync();
+    assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
 
     for thread in threads {
         thread.join().unwrap();
