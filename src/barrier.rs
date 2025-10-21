@@ -21,7 +21,7 @@ use crate::wait_queue::{Entry, WaitQueue};
 /// [`Barrier`] is a synchronization primitive that enables multiple tasks to start execution at the
 /// same time.
 pub struct Barrier {
-    /// [`Semaphore`] state.
+    /// [`Barrier`] state.
     state: AtomicUsize,
 }
 
@@ -41,12 +41,7 @@ impl Barrier {
     /// use saa::Barrier;
     /// use std::sync::atomic::Ordering::Relaxed;
     ///
-    /// let barrier = Barrier::with_count(11);
-    ///
-    /// assert_eq!(semaphore.available_permits(Relaxed), 11);
-    ///
-    /// assert!(semaphore.try_acquire_many(11));
-    /// assert!(!semaphore.is_open(Relaxed));
+    /// let barrier = Barrier::with_count(1);
     /// ```
     #[inline]
     #[must_use]
@@ -57,19 +52,18 @@ impl Barrier {
         }
     }
 
-    /// Gets a permit from the semaphore asynchronously.
+    /// Waits until a sufficient number of tasks have reached the barrier.
     ///
     /// # Examples
     ///
     /// ```
-    /// use saa::Semaphore;
+    /// use saa::Barrier;
     /// use std::sync::atomic::Ordering::Relaxed;
     ///
-    /// let semaphore = Semaphore::default();
+    /// let barrier = Barrier::with_count(1);
     ///
     /// async {
-    ///     semaphore.acquire_async().await;
-    ///     assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    ///     assert!(barrier.wait_async().await);
     /// };
     /// ```
     #[inline]
@@ -77,22 +71,21 @@ impl Barrier {
         self.wait_async_with(|| {}).await
     }
 
-    /// Gets a permit from the semaphore asynchronously with a wait callback.
+    /// Waits until a sufficient number of tasks have reached the barrier.
     ///
-    /// The callback is invoked when the task starts waiting for a permit.
+    /// The callback is invoked when the task starts waiting.
     ///
     /// # Examples
     ///
     /// ```
-    /// use saa::Semaphore;
+    /// use saa::Barrier;
     /// use std::sync::atomic::Ordering::Relaxed;
     ///
-    /// let semaphore = Semaphore::default();
+    /// let barrier = Barrier::with_count(1);
     ///
     /// async {
     ///     let mut wait = false;
-    ///     semaphore.acquire_async_with(|| { wait = true; }).await;
-    ///     assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    ///     assert!(barrier.wait_async_with(|| { wait = true; }).await);
     ///     assert!(!wait);
     /// };
     /// ```
@@ -113,39 +106,37 @@ impl Barrier {
         }
     }
 
-    /// Gets a permit from the semaphore synchronously.
+    /// Waits until a sufficient number of tasks have reached the barrier.
     ///
     /// # Examples
     ///
     /// ```
-    /// use saa::Semaphore;
+    /// use saa::Barrier;
     /// use std::sync::atomic::Ordering::Relaxed;
     ///
-    /// let semaphore = Semaphore::default();
+    /// let barrier = Barrier::with_count(1);
     ///
-    /// semaphore.acquire_sync();
-    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    /// assert!(barrier.wait_sync());
     /// ```
     #[inline]
     pub fn wait_sync(&self) -> bool {
         self.wait_sync_with(|| ())
     }
 
-    /// Gets multiple permits from the semaphore synchronously with a wait callback.
+    /// Waits until a sufficient number of tasks have reached the barrier.
     ///
     /// The callback is invoked when the task starts waiting for permits.
     ///
     /// # Examples
     ///
     /// ```
-    /// use saa::Semaphore;
+    /// use saa::Barrier;
     /// use std::sync::atomic::Ordering::Relaxed;
     ///
-    /// let semaphore = Semaphore::default();
+    /// let barrier = Barrier::with_count(1);
     ///
     /// let mut wait = false;
-    /// semaphore.acquire_sync_with(|| { wait = true; });
-    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    /// assert!(barrier.wait_sync_with(|| { wait = true; }));
     /// assert!(!wait);
     /// ```
     #[inline]
@@ -173,7 +164,7 @@ impl Barrier {
         &self,
         pager: &mut Pin<&mut Pager<Self>>,
         is_sync: bool,
-        wait_callback: F,
+        begin_wait: F,
     ) -> Option<F> {
         let mut state = self.state.load(Acquire);
         let wait_queue = pager.wait_queue();
@@ -186,7 +177,7 @@ impl Barrier {
                     .try_push_wait_queue_entry(pager.wait_queue(), state, || ())
                     .is_none()
                 {
-                    return Some(wait_callback);
+                    return Some(begin_wait);
                 }
                 state = self.state.load(Acquire);
             } else if count == 1 {
@@ -240,7 +231,7 @@ impl Barrier {
                     Ok(_) => {
                         // The entry cannot be dropped until the result is acknowledged.
                         wait_queue.entry().set_pollable();
-                        wait_callback();
+                        begin_wait();
                         return None;
                     }
                     Err(new_state) => state = new_state,
