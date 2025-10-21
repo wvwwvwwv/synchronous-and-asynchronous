@@ -9,9 +9,7 @@ pub(crate) enum Opcode {
     Exclusive,
     /// Acquires shared ownership.
     Shared,
-    /// Barrier operation.
-    ///
-    /// The boolean flag indicates whether the operation is wait-only.
+    /// Barrier operation where the boolean flag indicates whether the operation is wait-only.
     Barrier(bool),
     /// Acquires semaphores.
     Semaphore(u8),

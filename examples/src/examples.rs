@@ -1,5 +1,6 @@
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
 use std::thread;
 
 use saa::gate::{Error, State};
@@ -37,6 +38,8 @@ fn barrier() {
     for thread in threads {
         thread.join().unwrap();
     }
+
+    assert_eq!(barrier.count(Relaxed), 8);
 }
 
 #[test]

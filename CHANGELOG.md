@@ -2,7 +2,7 @@
 
 5.1.0
 
-* Add `Barrier`.
+* API update: add `Barrier`.
 
 5.0.0
 

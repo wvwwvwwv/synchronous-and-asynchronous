@@ -158,6 +158,6 @@ Using synchronous methods in an asynchronous context may lead to deadlocks. Cons
 * ThreadId(0): `task-0: share-waiting / pending` || `task-1: "synchronous"-lock-waiting`.
 * ThreadId(1): `task-2: release-lock / ready: wake-up task-0` -> `task-2: lock-waiting / pending`.
 
-In this example, `task-0` has logically acquired a shared lock transferred from `task-2`; however, it may remain in the task queue indefinitely depending on the asynchronous runtime's scheduling policy.
+In this example, `task-0` has logically acquired a shared lock transferred from `task-2`; however, it may remain in the task queue indefinitely depending on the task scheduling policy.
 
 ## [Changelog](https://github.com/wvwwvwwv/synchronous-and-asynchronous/blob/main/CHANGELOG.md)
