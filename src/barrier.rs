@@ -7,7 +7,7 @@ use std::fmt;
 use std::pin::{Pin, pin};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
+use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed};
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
@@ -39,7 +39,6 @@ impl Barrier {
     ///
     /// ```
     /// use saa::Barrier;
-    /// use std::sync::atomic::Ordering::Relaxed;
     ///
     /// let barrier = Barrier::with_count(1);
     /// ```
@@ -57,16 +56,17 @@ impl Barrier {
     /// # Examples
     ///
     /// ```
-    /// use saa::Barrier;
     /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// use saa::Barrier;
     ///
     /// let barrier = Barrier::with_count(1);
     ///
-    /// assert_eq!(barrier.count(), 1);
+    /// assert_eq!(barrier.count(Relaxed), 1);
     /// ```
     #[inline]
-    pub fn count(&self) -> usize {
-        self.state.load(Relaxed) & WaitQueue::DATA_MASK
+    pub fn count(&self, mo: Ordering) -> usize {
+        self.state.load(mo) & WaitQueue::DATA_MASK
     }
 
     /// Waits until a sufficient number of tasks have reached the barrier.
@@ -77,7 +77,6 @@ impl Barrier {
     ///
     /// ```
     /// use saa::Barrier;
-    /// use std::sync::atomic::Ordering::Relaxed;
     ///
     /// let barrier = Barrier::with_count(1);
     ///
@@ -99,7 +98,6 @@ impl Barrier {
     ///
     /// ```
     /// use saa::Barrier;
-    /// use std::sync::atomic::Ordering::Relaxed;
     ///
     /// let barrier = Barrier::with_count(1);
     ///
@@ -111,8 +109,8 @@ impl Barrier {
     /// ```
     #[inline]
     pub async fn wait_async_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
+        let mut pinned_pager = pin!(Pager::default());
         loop {
-            let mut pinned_pager = pin!(Pager::default());
             pinned_pager
                 .wait_queue()
                 .construct(self, Opcode::Barrier(false), false);
@@ -134,7 +132,6 @@ impl Barrier {
     ///
     /// ```
     /// use saa::Barrier;
-    /// use std::sync::atomic::Ordering::Relaxed;
     ///
     /// let barrier = Barrier::with_count(1);
     ///
@@ -154,7 +151,6 @@ impl Barrier {
     ///
     /// ```
     /// use saa::Barrier;
-    /// use std::sync::atomic::Ordering::Relaxed;
     ///
     /// let barrier = Barrier::with_count(1);
     ///
@@ -164,8 +160,8 @@ impl Barrier {
     /// ```
     #[inline]
     pub fn wait_sync_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
+        let mut pinned_pager = pin!(Pager::default());
         loop {
-            let mut pinned_pager = pin!(Pager::default());
             pinned_pager
                 .wait_queue()
                 .construct(self, Opcode::Barrier(false), true);

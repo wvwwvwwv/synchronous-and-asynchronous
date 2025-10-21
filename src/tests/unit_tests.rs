@@ -574,6 +574,30 @@ async fn lock_pager_wait_parallel() {
     }
 }
 
+#[test]
+fn barrier_sync() {
+    let num_threads = if cfg!(miri) { 4 } else { Barrier::MAX_TASKS };
+    let num_iters = if cfg!(miri) { 2 } else { 8 };
+    let barrier = Arc::new(Barrier::with_count(num_threads));
+
+    let mut threads = Vec::new();
+    for _ in 0..num_threads {
+        let barrier = barrier.clone();
+        threads.push(thread::spawn(move || {
+            for _ in 0..num_iters {
+                debug_assert!(barrier.count(Relaxed) <= num_threads);
+                barrier.wait_sync();
+            }
+            debug_assert!(barrier.count(Relaxed) <= num_threads);
+        }));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    assert_eq!(barrier.count(Relaxed), num_threads);
+}
+
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn semaphore_async() {
