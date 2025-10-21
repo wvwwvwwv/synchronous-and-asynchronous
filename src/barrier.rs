@@ -156,7 +156,7 @@ impl Barrier {
         }
     }
 
-    /// Pushes the wait queue entry.
+    /// Counts down the barrier counter.
     ///
     /// Returns the wait callback if it needs to be retried.
     #[inline]
@@ -181,22 +181,24 @@ impl Barrier {
                 }
                 state = self.state.load(Acquire);
             } else if count == 1 {
-                // This is the last thread, therefore we can reset the counter.
+                // This is the last task to reach the barrier, therefore we can reset the counter.
                 match self.state.compare_exchange(state, 0, Acquire, Acquire) {
-                    Ok(mut value) => {
+                    Ok(value) => {
                         let mut anchor_ptr = WaitQueue::to_anchor_ptr(value);
                         if !anchor_ptr.is_null() {
                             let tail_entry_ptr = WaitQueue::to_entry_ptr(anchor_ptr);
                             Entry::iter_forward(tail_entry_ptr, false, |entry, _| {
                                 count += 1;
+                                // `0` means that all the tasks have reached the barrier, but it is
+                                // not the last one.
                                 entry.set_result(0);
                                 false
                             });
                         }
+                        debug_assert!(count <= Self::MAX_TASKS);
 
                         // Wake-up waiting tasks.
-                        value = self.state.swap(count, AcqRel);
-                        anchor_ptr = WaitQueue::to_anchor_ptr(value);
+                        anchor_ptr = WaitQueue::to_anchor_ptr(self.state.swap(count, AcqRel));
                         if !anchor_ptr.is_null() {
                             let tail_entry_ptr = WaitQueue::to_entry_ptr(anchor_ptr);
                             Entry::iter_forward(tail_entry_ptr, false, |entry, _| {
@@ -206,7 +208,7 @@ impl Barrier {
                             });
                         }
 
-                        // Mark that the barrier is reset by this method call.
+                        // `1` means that the task is the last one to count down the barrier.
                         wait_queue.entry().set_result(1);
                         return None;
                     }
@@ -217,12 +219,11 @@ impl Barrier {
                 let anchor_addr = anchor_ptr.expose_provenance();
                 debug_assert_eq!(anchor_addr & (!WaitQueue::ADDR_MASK), 0);
 
-                let tail_anchor_ptr = WaitQueue::to_anchor_ptr(state);
                 wait_queue
                     .entry()
-                    .update_next_entry_anchor_ptr(tail_anchor_ptr);
+                    .update_next_entry_anchor_ptr(WaitQueue::to_anchor_ptr(state));
 
-                // The anchor pointer, instead of an entry pointer, is stored in the state.
+                // Count down here.
                 let next_state = ((state - 1) & (!WaitQueue::ADDR_MASK)) | anchor_addr;
                 match self
                     .state

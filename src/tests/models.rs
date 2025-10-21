@@ -6,7 +6,7 @@ use loom::sync::atomic::AtomicBool;
 use loom::thread::{spawn, yield_now};
 
 use crate::gate;
-use crate::{Gate, Lock, Pager, Semaphore};
+use crate::{Barrier, Gate, Lock, Pager, Semaphore};
 
 #[test]
 fn lock_shared() {
@@ -124,6 +124,30 @@ fn lock_poison() {
         assert!(thread_1.join().is_ok());
         assert!(thread_2.join().is_ok());
         assert!(lock.is_poisoned(Relaxed));
+    });
+}
+
+#[test]
+fn barrier() {
+    loom::model(|| {
+        let barrier = Arc::new(Barrier::with_count(2));
+        let check = Arc::new(AtomicBool::new(false));
+
+        let barrier_clone = barrier.clone();
+        let check_clone = check.clone();
+        let thread = spawn(move || {
+            if barrier_clone.wait_sync() {
+                assert!(!check_clone.swap(true, Relaxed));
+            }
+            barrier_clone.wait_sync();
+        });
+
+        if barrier.wait_sync() {
+            assert!(!check.swap(true, Relaxed));
+        }
+        barrier.wait_sync();
+        assert!(thread.join().is_ok());
+        assert!(check.load(Relaxed));
     });
 }
 

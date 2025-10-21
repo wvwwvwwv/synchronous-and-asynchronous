@@ -1,11 +1,11 @@
 use std::pin::pin;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::Relaxed;
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::Ordering::{Relaxed, Release};
 use std::thread;
 use std::time::Duration;
 
-use crate::{Gate, Lock, Pager, Semaphore, gate, lock};
+use crate::{Barrier, Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
@@ -23,6 +23,14 @@ fn future_size() {
 
     let share_with_fut = &lock.share_async_with(|| {});
     assert!(size_of_val(share_with_fut) < limit);
+
+    let barrier = Barrier::default();
+
+    let barrier_fut = &barrier.wait_async();
+    assert!(size_of_val(barrier_fut) < limit + 24);
+
+    let barrier_with_fut = &barrier.wait_async_with(|| {});
+    assert!(size_of_val(barrier_with_fut) < limit + 24);
 
     let semaphore = Semaphore::default();
 
@@ -180,7 +188,7 @@ fn lock_sync_wait_callback() {
     } else {
         Lock::MAX_SHARED_OWNERS
     };
-    let barrier = Arc::new(Barrier::new(num_threads + 1));
+    let barrier = Arc::new(Barrier::with_count(num_threads + 1));
     let lock = Arc::new(Lock::default());
 
     lock.lock_sync();
@@ -192,12 +200,12 @@ fn lock_sync_wait_callback() {
         threads.push(thread::spawn(move || {
             let result = if i % 7 == 3 {
                 lock.lock_sync_with(|| {
-                    barrier.wait();
+                    barrier.wait_sync();
                 });
                 lock.release_lock()
             } else {
                 lock.share_sync_with(|| {
-                    barrier.wait();
+                    barrier.wait_sync();
                 });
                 lock.release_share()
             };
@@ -205,7 +213,7 @@ fn lock_sync_wait_callback() {
         }));
     }
 
-    barrier.wait();
+    barrier.wait_sync();
     assert!(lock.release_lock());
 
     for thread in threads {
@@ -352,7 +360,7 @@ fn lock_poison_wait_sync() {
     } else {
         Lock::MAX_SHARED_OWNERS
     };
-    let barrier = Arc::new(Barrier::new(num_threads + 1));
+    let barrier = Arc::new(Barrier::with_count(num_threads + 1));
     let lock = Arc::new(Lock::default());
 
     lock.lock_sync();
@@ -364,17 +372,17 @@ fn lock_poison_wait_sync() {
         threads.push(thread::spawn(move || {
             if i % 2 == 0 {
                 assert!(!lock.lock_sync_with(|| {
-                    barrier.wait();
+                    barrier.wait_sync();
                 }));
             } else {
                 assert!(!lock.share_sync_with(|| {
-                    barrier.wait();
+                    barrier.wait_sync();
                 }));
             }
         }));
     }
 
-    barrier.wait();
+    barrier.wait_sync();
     assert!(lock.poison_lock());
 
     for thread in threads {
@@ -656,7 +664,7 @@ fn semaphore_sync_wait_callback() {
     } else {
         Semaphore::MAX_PERMITS
     };
-    let barrier = Arc::new(Barrier::new(num_threads + 1));
+    let barrier = Arc::new(Barrier::with_count(num_threads + 1));
     let semaphore = Arc::new(Semaphore::default());
 
     assert!(semaphore.acquire_many_sync(Semaphore::MAX_PERMITS));
@@ -668,21 +676,22 @@ fn semaphore_sync_wait_callback() {
         threads.push(thread::spawn(move || {
             let result = if i % 7 == 3 {
                 semaphore.acquire_sync_with(|| {
-                    barrier.wait();
+                    if barrier.wait_sync() {
+                        assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
+                    }
                 });
                 semaphore.release()
             } else {
                 semaphore.acquire_many_sync_with(3, || {
-                    barrier.wait();
+                    if barrier.wait_sync() {
+                        assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
+                    }
                 });
                 semaphore.release_many(3)
             };
             assert!(result);
         }));
     }
-
-    barrier.wait();
-    assert!(semaphore.release_many(Semaphore::MAX_PERMITS));
 
     for thread in threads {
         thread.join().unwrap();
@@ -1035,6 +1044,52 @@ async fn lock_chaos() {
     }
 
     assert_eq!(check.load(Relaxed), 0);
+}
+
+#[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn barrier_chaos() {
+    let num_tasks = 16;
+    let num_iters = 2048;
+    let check = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::with_count(num_tasks));
+
+    let mut threads = Vec::new();
+    let mut tasks = Vec::new();
+    for i in 0..num_tasks {
+        let check = check.clone();
+        let barrier = barrier.clone();
+        if i % 2 == 0 {
+            tasks.push(tokio::spawn(async move {
+                for i in 0..num_iters {
+                    debug_assert_eq!(check.load(Relaxed), i);
+                    if barrier.wait_async().await {
+                        check.fetch_add(1, Release);
+                    }
+                    barrier.wait_async().await;
+                }
+            }));
+        } else {
+            threads.push(thread::spawn(move || {
+                for i in 0..num_iters {
+                    debug_assert_eq!(check.load(Relaxed), i);
+                    if barrier.wait_sync() {
+                        check.swap(i + 1, Release);
+                    }
+                    barrier.wait_sync();
+                }
+            }));
+        }
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    assert_eq!(check.load(Relaxed), num_iters);
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
