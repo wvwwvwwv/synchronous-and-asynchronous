@@ -9,8 +9,8 @@ rust-version = "1.85.0"
 readme = "README.md"
 repository = "https://github.com/wvwwvwwv/synchronous-and-asynchronous/"
 license = "Apache-2.0"
-categories = ["asynchronous", "concurrency", "data-structures", "mutex"]
-keywords = ["async", "concurrent", "synchronization"]
+categories = ["asynchronous", "concurrency", "data-structures"]
+keywords = ["async", "concurrency", "mutex", "synchronization"]
 
 [workspace]
 members = [".", "examples"]
