@@ -39,7 +39,7 @@ pub enum Mode {
     /// Waits for the [`Lock`] to be free or poisoned.
     ///
     /// [`Self::WaitExclusive`], [`Self::WaitShared`], [`Lock::try_lock`], and [`Lock::try_share`]
-    /// provide a way to bypass the fair queueing mechanism without spinning.
+    /// provide a way to bypass the fair queuing mechanism without spinning.
     WaitExclusive,
     /// Waits for a shared lock to be available or the [`Lock`] to be poisoned.
     ///

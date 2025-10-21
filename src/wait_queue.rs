@@ -59,7 +59,7 @@ pub(crate) struct Entry {
     state: AtomicU16,
     /// Indicates that the wait queue entry can be polled.
     ///
-    /// If the flag is set, the `drop` method will automatically release unknowlingly acquired
+    /// If the flag is set, the `drop` method will automatically release unknowingly acquired
     /// resources.
     pollable: std::sync::atomic::AtomicBool, // `Loom` is too slow when it is added to modeling.
     /// Monitors the result.
