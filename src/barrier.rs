@@ -7,7 +7,7 @@ use std::fmt;
 use std::pin::{Pin, pin};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
@@ -16,7 +16,7 @@ use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
-use crate::wait_queue::{Entry, PinnedEntry, WaitQueue};
+use crate::wait_queue::{Entry, WaitQueue};
 
 /// [`Barrier`] is a synchronization primitive that enables multiple tasks to start execution at the
 /// same time.
@@ -73,8 +73,8 @@ impl Barrier {
     /// };
     /// ```
     #[inline]
-    pub async fn wait_async(&self) {
-        self.acquire_async_with_internal(1, || {}).await;
+    pub async fn wait_async(&self) -> bool {
+        self.wait_async_with(|| {}).await
     }
 
     /// Gets a permit from the semaphore asynchronously with a wait callback.
@@ -97,8 +97,20 @@ impl Barrier {
     /// };
     /// ```
     #[inline]
-    pub async fn wait_async_with<F: FnOnce()>(&self, begin_wait: F) {
-        self.acquire_async_with_internal(1, begin_wait).await;
+    pub async fn wait_async_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
+        loop {
+            let mut pinned_pager = pin!(Pager::default());
+            pinned_pager
+                .wait_queue()
+                .construct(self, Opcode::Barrier(false), false);
+            if let Some(returned) = self.count_down(&mut pinned_pager, false, begin_wait) {
+                begin_wait = returned;
+                let result = pinned_pager.poll_async().await.unwrap_or(false);
+                debug_assert!(!result);
+            } else {
+                return pinned_pager.poll_async().await.unwrap_or(false);
+            }
+        }
     }
 
     /// Gets a permit from the semaphore synchronously.
@@ -115,8 +127,8 @@ impl Barrier {
     /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
     /// ```
     #[inline]
-    pub fn wait_sync(&self) {
-        self.acquire_many_sync_with(1, || ());
+    pub fn wait_sync(&self) -> bool {
+        self.wait_sync_with(|| ())
     }
 
     /// Gets multiple permits from the semaphore synchronously with a wait callback.
@@ -137,123 +149,102 @@ impl Barrier {
     /// assert!(!wait);
     /// ```
     #[inline]
-    pub fn wait_sync_with<F: FnOnce()>(&self, begin_wait: F) {
-        self.acquire_many_sync_with(1, begin_wait);
-    }
-
-    /// Registers a [`Pager`] to allow it to get a permit remotely.
-    ///
-    /// `is_sync` indicates whether the [`Pager`] will be polled asynchronously (`false`) or
-    /// synchronously (`true`).
-    ///
-    /// Returns `false` if the [`Pager`] was already registered, or if the count is greater than the
-    /// maximum number of permits.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::pin::pin;
-    ///
-    /// use saa::{Pager, Semaphore};
-    ///
-    /// let semaphore = Semaphore::default();
-    ///
-    /// let mut pinned_pager = pin!(Pager::default());
-    ///
-    /// assert!(semaphore.register_pager(&mut pinned_pager, 1, true));
-    /// assert!(!semaphore.register_pager(&mut pinned_pager, 1, true));
-    ///
-    /// assert!(pinned_pager.poll_sync().is_ok());
-    /// ```
-    #[inline]
-    pub fn register_pager<'s>(
-        &'s self,
-        pager: &mut Pin<&mut Pager<'s, Self>>,
-        count: usize,
-        is_sync: bool,
-    ) -> bool {
-        if count > Self::MAX_TASKS || pager.is_registered() {
-            return false;
-        }
-        let Ok(count) = u8::try_from(count) else {
-            return false;
-        };
-
-        pager
-            .wait_queue()
-            .construct(self, Opcode::Semaphore(count), is_sync);
-
+    pub fn wait_sync_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
         loop {
-            let (result, state) = self.try_acquire_internal(count);
-            if result {
-                pager.wait_queue().entry().set_result(0);
-                break;
-            }
-
-            if self
-                .try_push_wait_queue_entry(pager.wait_queue(), state, || ())
-                .is_none()
-            {
-                break;
-            }
-        }
-        true
-    }
-
-    /// Acquires permits asynchronously.
-    #[inline]
-    async fn acquire_async_with_internal<F: FnOnce()>(
-        &self,
-        count: usize,
-        mut begin_wait: F,
-    ) -> bool {
-        if count > Semaphore::MAX_PERMITS {
-            return false;
-        }
-        let Ok(count) = u8::try_from(count) else {
-            return false;
-        };
-        loop {
-            let (result, state) = self.try_acquire_internal(count);
-            if result {
-                return true;
-            }
-            debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-
-            let async_wait = pin!(WaitQueue::default());
-            async_wait
-                .as_ref()
-                .construct(self, Opcode::Semaphore(count), false);
-            if let Some(returned) =
-                self.try_push_wait_queue_entry(async_wait.as_ref(), state, begin_wait)
-            {
+            let mut pinned_pager = pin!(Pager::default());
+            pinned_pager
+                .wait_queue()
+                .construct(self, Opcode::Barrier(false), true);
+            if let Some(returned) = self.count_down(&mut pinned_pager, true, begin_wait) {
                 begin_wait = returned;
-                continue;
+                let result = pinned_pager.poll_sync().unwrap_or(false);
+                debug_assert!(!result);
+            } else {
+                return pinned_pager.poll_sync().unwrap_or(false);
             }
-
-            PinnedEntry(Pin::new(async_wait.entry())).await;
-            return true;
         }
     }
 
-    /// Tries to acquire a permit.
+    /// Pushes the wait queue entry.
+    ///
+    /// Returns the wait callback if it needs to be retried.
     #[inline]
-    fn try_acquire_internal(&self, count: u8) -> (bool, usize) {
+    fn count_down<F: FnOnce()>(
+        &self,
+        pager: &mut Pin<&mut Pager<Self>>,
+        is_sync: bool,
+        wait_callback: F,
+    ) -> Option<F> {
         let mut state = self.state.load(Acquire);
+        let wait_queue = pager.wait_queue();
         loop {
-            if state & WaitQueue::ADDR_MASK != 0
-                || (state & WaitQueue::DATA_MASK) + usize::from(count) > Self::MAX_TASKS
-            {
-                // There is a waiting thread, or the semaphore can no longer be shared.
-                return (false, state);
-            }
+            let mut count = state & WaitQueue::DATA_MASK;
+            if count == 0 {
+                // The counter cannot be decremented, therefore wait for the counter to be reset.
+                wait_queue.construct(self, Opcode::Barrier(true), is_sync);
+                if self
+                    .try_push_wait_queue_entry(pager.wait_queue(), state, || ())
+                    .is_none()
+                {
+                    return Some(wait_callback);
+                }
+                state = self.state.load(Acquire);
+            } else if count == 1 {
+                // This is the last thread, therefore we can reset the counter.
+                match self.state.compare_exchange(state, 0, Acquire, Acquire) {
+                    Ok(mut value) => {
+                        let mut anchor_ptr = WaitQueue::to_anchor_ptr(value);
+                        if !anchor_ptr.is_null() {
+                            let tail_entry_ptr = WaitQueue::to_entry_ptr(anchor_ptr);
+                            Entry::iter_forward(tail_entry_ptr, false, |entry, _| {
+                                count += 1;
+                                entry.set_result(0);
+                                false
+                            });
+                        }
 
-            match self
-                .state
-                .compare_exchange(state, state + usize::from(count), Acquire, Acquire)
-            {
-                Ok(_) => return (true, 0),
-                Err(new_state) => state = new_state,
+                        // Wake-up waiting tasks.
+                        value = self.state.swap(count, AcqRel);
+                        anchor_ptr = WaitQueue::to_anchor_ptr(value);
+                        if !anchor_ptr.is_null() {
+                            let tail_entry_ptr = WaitQueue::to_entry_ptr(anchor_ptr);
+                            Entry::iter_forward(tail_entry_ptr, false, |entry, _| {
+                                // `2` means that the waiting task needs to retry.
+                                entry.set_result(2);
+                                false
+                            });
+                        }
+
+                        // Mark that the barrier is reset by this method call.
+                        wait_queue.entry().set_result(1);
+                        return None;
+                    }
+                    Err(new_state) => state = new_state,
+                }
+            } else {
+                let anchor_ptr = wait_queue.anchor_ptr().0;
+                let anchor_addr = anchor_ptr.expose_provenance();
+                debug_assert_eq!(anchor_addr & (!WaitQueue::ADDR_MASK), 0);
+
+                let tail_anchor_ptr = WaitQueue::to_anchor_ptr(state);
+                wait_queue
+                    .entry()
+                    .update_next_entry_anchor_ptr(tail_anchor_ptr);
+
+                // The anchor pointer, instead of an entry pointer, is stored in the state.
+                let next_state = ((state - 1) & (!WaitQueue::ADDR_MASK)) | anchor_addr;
+                match self
+                    .state
+                    .compare_exchange(state, next_state, AcqRel, Acquire)
+                {
+                    Ok(_) => {
+                        // The entry cannot be dropped until the result is acknowledged.
+                        wait_queue.entry().set_pollable();
+                        wait_callback();
+                        return None;
+                    }
+                    Err(new_state) => state = new_state,
+                }
             }
         }
     }
@@ -262,12 +253,12 @@ impl Barrier {
 impl fmt::Debug for Barrier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.load(Relaxed);
-        let available_permits = Self::MAX_PERMITS - (state & WaitQueue::DATA_MASK);
+        let count = state & WaitQueue::DATA_MASK;
         let wait_queue_being_processed = state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG;
         let wait_queue_tail_addr = state & WaitQueue::ADDR_MASK;
         f.debug_struct("WaitQueue")
             .field("state", &state)
-            .field("available_permits", &available_permits)
+            .field("count", &count)
             .field("wait_queue_being_processed", &wait_queue_being_processed)
             .field("wait_queue_tail_addr", &wait_queue_tail_addr)
             .finish()
@@ -302,10 +293,10 @@ impl SyncPrimitive for Barrier {
 }
 
 impl SyncResult for Barrier {
-    type Result = Result<(), pager::Error>;
+    type Result = Result<bool, pager::Error>;
 
     #[inline]
-    fn to_result(_: u8, pager_error: Option<pager::Error>) -> Self::Result {
-        pager_error.map_or_else(|| Ok(()), Err)
+    fn to_result(result: u8, pager_error: Option<pager::Error>) -> Self::Result {
+        pager_error.map_or_else(|| Ok(result == 1), Err)
     }
 }

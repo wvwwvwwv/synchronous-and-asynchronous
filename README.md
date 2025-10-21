@@ -8,8 +8,9 @@ Low-level synchronization primitives providing both asynchronous and synchronous
 
 ## Features
 
-- No hidden global variables.
+- No heap allocation.
 - Provides both asynchronous and synchronous interfaces.
+- Word-sized without hidden global variables.
 - [`Loom`](https://github.com/tokio-rs/loom) support: `features = ["loom"]`.
 
 ## Lock
@@ -35,6 +36,16 @@ async {
     lock.share_async();
     assert!(lock.release_share());
 };
+```
+
+## Barrier
+
+`saa::Barrier` is a synchronization primitive to enable a number of tasks to start execution at the same time.
+
+```rust
+use saa::Barrier;
+
+let barrier = Barrier::with_count(1);
 ```
 
 ## Semaphore
