@@ -86,6 +86,33 @@ fn multi_threaded_workload(iters: u64, num_threads: usize, num_cycles: usize) ->
         .fold(Duration::from_nanos(0), |acc, t| acc.max(t.join().unwrap()))
 }
 
+fn multi_threaded_workload_std(iters: u64, num_threads: usize, num_cycles: usize) -> Duration {
+    let lock = Arc::new(std::sync::Mutex::<()>::default());
+    let mut threads = Vec::with_capacity(num_threads);
+    let barrier = Arc::new(Barrier::with_count(num_threads));
+    for _ in 0..num_threads {
+        let barrier = barrier.clone();
+        let lock = lock.clone();
+        let join = thread::spawn(move || {
+            barrier.wait_sync();
+            let start = Instant::now();
+            for _ in 0..iters {
+                let guard = lock.lock().unwrap();
+                let acc = black_box({
+                    (black_box(0)..black_box(num_cycles)).fold(black_box(0), |acc, v| acc + v)
+                });
+                assert_eq!(acc, (0..num_cycles).sum::<usize>());
+                drop(guard);
+            }
+            start.elapsed()
+        });
+        threads.push(join);
+    }
+    threads
+        .into_iter()
+        .fold(Duration::from_nanos(0), |acc, t| acc.max(t.join().unwrap()))
+}
+
 macro_rules! multi_threaded {
     ($name:ident, $num_threads:expr, $num_cycles:expr) => {
         fn $name(c: &mut Criterion) {
@@ -96,10 +123,24 @@ macro_rules! multi_threaded {
     };
 }
 
+macro_rules! multi_threaded_std {
+    ($name:ident, $num_threads:expr, $num_cycles:expr) => {
+        fn $name(c: &mut Criterion) {
+            c.bench_function(stringify!($name), |b| {
+                b.iter_custom(|iters| multi_threaded_workload_std(iters, $num_threads, $num_cycles))
+            });
+        }
+    };
+}
+
 multi_threaded!(multi_threaded_2_1, 2, 1);
 multi_threaded!(multi_threaded_2_256, 2, 256);
 multi_threaded!(multi_threaded_8_1, 8, 1);
 multi_threaded!(multi_threaded_8_256, 8, 256);
+multi_threaded_std!(multi_threaded_std_2_1, 2, 1);
+multi_threaded_std!(multi_threaded_std_2_256, 2, 256);
+multi_threaded_std!(multi_threaded_std_8_1, 8, 1);
+multi_threaded_std!(multi_threaded_std_8_256, 8, 256);
 
 criterion_group!(
     lock,
@@ -110,5 +151,9 @@ criterion_group!(
     multi_threaded_2_256,
     multi_threaded_8_1,
     multi_threaded_8_256,
+    multi_threaded_std_2_1,
+    multi_threaded_std_2_256,
+    multi_threaded_std_8_1,
+    multi_threaded_std_8_256,
 );
 criterion_main!(lock);
