@@ -12,21 +12,22 @@ use std::thread::yield_now;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
 
-use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::{Entry, PinnedEntry, WaitQueue};
+use crate::{Config, DefaultConfig, Pager};
 
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 ///
 /// The locking semantics are similar to [`RwLock`](std::sync::RwLock), however, [`Lock`] only
 /// provides low-level locking and releasing methods, hence forcing the user to manage the scope of
 /// acquired locks and the resources to protect.
-#[derive(Default)]
-pub struct Lock {
+pub struct Lock<C: Config = DefaultConfig> {
     /// [`Lock`] state.
     state: AtomicUsize,
+    /// Configuration.
+    config: C,
 }
 
 /// Operation mode.
@@ -48,7 +49,7 @@ pub enum Mode {
     WaitShared,
 }
 
-impl Lock {
+impl<C: Config> Lock<C> {
     /// Maximum number of shared owners.
     pub const MAX_SHARED_OWNERS: usize = WaitQueue::DATA_MASK - 1;
 
@@ -63,6 +64,25 @@ impl Lock {
 
     /// Poisoned error code.
     const POISONED: u8 = 2_u8;
+
+    /// Creates a new [`Lock`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use saa::config::DefaultConfig;
+    ///
+    /// let lock = Lock::<DefaultConfig>::new();
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+            config: C::default(),
+        }
+    }
 
     /// Returns `true` if the lock is currently free.
     ///
@@ -624,13 +644,21 @@ impl Lock {
     /// Tries to acquire an exclusive lock.
     #[inline]
     fn try_lock_internal(&self) -> (u8, usize) {
-        let Err(state) = self
+        let Err(mut state) = self
             .state
             .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Acquire)
         else {
             return (Self::ACQUIRED, 0);
         };
-        self.try_lock_internal_slow(state)
+        let mut result = Self::NOT_ACQUIRED;
+        for spin_count in 0..C::spin_count() {
+            (result, state) = self.try_lock_internal_slow(state);
+            if result != Self::NOT_ACQUIRED {
+                return (result, state);
+            }
+            C::backoff(spin_count);
+        }
+        (result, state)
     }
 
     /// Tries to acquire an exclusive lock, slowly.
@@ -769,7 +797,14 @@ impl Lock {
     }
 }
 
-impl fmt::Debug for Lock {
+impl Default for Lock<DefaultConfig> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<C: Config> fmt::Debug for Lock<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.load(Relaxed);
         let lock_share_state = state & WaitQueue::DATA_MASK;
@@ -785,11 +820,12 @@ impl fmt::Debug for Lock {
             .field("poisoned", &poisoned)
             .field("wait_queue_being_processed", &wait_queue_being_processed)
             .field("wait_queue_tail_addr", &wait_queue_tail_addr)
+            .field("config", &self.config)
             .finish()
     }
 }
 
-impl SyncPrimitive for Lock {
+impl<C: Config> SyncPrimitive for Lock<C> {
     #[inline]
     fn state(&self) -> &AtomicUsize {
         &self.state
@@ -806,7 +842,7 @@ impl SyncPrimitive for Lock {
     }
 }
 
-impl SyncResult for Lock {
+impl<C: Config> SyncResult for Lock<C> {
     type Result = Result<bool, pager::Error>;
 
     #[inline]

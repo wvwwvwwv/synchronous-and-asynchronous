@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering::{Relaxed, Release};
 use std::thread;
 use std::time::Duration;
 
-use crate::{Barrier, Gate, Lock, Pager, Semaphore, gate, lock};
+use crate::{Barrier, DefaultConfig, Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
@@ -102,7 +102,7 @@ fn lock_sync() {
     let num_threads = if cfg!(miri) {
         4
     } else {
-        Lock::MAX_SHARED_OWNERS
+        Lock::<DefaultConfig>::MAX_SHARED_OWNERS
     };
     let num_iters = if cfg!(miri) { 32 } else { 256 };
     let check = Arc::new(AtomicUsize::new(0));
@@ -125,7 +125,7 @@ fn lock_sync() {
                     assert!(lock.release_lock());
                 } else {
                     assert!(lock.share_sync());
-                    assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
+                    assert!(check.fetch_add(1, Relaxed) < Lock::<DefaultConfig>::MAX_SHARED_OWNERS);
                     thread::sleep(Duration::from_micros(1));
                     check.fetch_sub(1, Relaxed);
                     assert!(lock.release_share());
@@ -186,7 +186,7 @@ fn lock_sync_wait_callback() {
     let num_threads = if cfg!(miri) {
         4
     } else {
-        Lock::MAX_SHARED_OWNERS
+        Lock::<DefaultConfig>::MAX_SHARED_OWNERS
     };
     let barrier = Arc::new(Barrier::with_count(num_threads + 1));
     let lock = Arc::new(Lock::default());
@@ -267,7 +267,7 @@ fn lock_poison_sync() {
     let num_threads = if cfg!(miri) {
         4
     } else {
-        Lock::MAX_SHARED_OWNERS
+        Lock::<DefaultConfig>::MAX_SHARED_OWNERS
     };
     let num_iters = if cfg!(miri) { 4 } else { 64 };
     let lock = Arc::new(Lock::default());
@@ -358,7 +358,7 @@ fn lock_poison_wait_sync() {
     let num_threads = if cfg!(miri) {
         4
     } else {
-        Lock::MAX_SHARED_OWNERS
+        Lock::<DefaultConfig>::MAX_SHARED_OWNERS
     };
     let barrier = Arc::new(Barrier::with_count(num_threads + 1));
     let lock = Arc::new(Lock::default());
@@ -1011,7 +1011,7 @@ fn pager_drop_explicit() {
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn lock_chaos() {
-    let num_tasks = Lock::MAX_SHARED_OWNERS;
+    let num_tasks = Lock::<DefaultConfig>::MAX_SHARED_OWNERS;
     let num_iters = 2048;
     let check = Arc::new(AtomicUsize::new(0));
     let lock = Arc::new(Lock::default());
@@ -1032,7 +1032,9 @@ async fn lock_chaos() {
                         assert!(lock.release_lock());
                     } else {
                         assert!(lock.share_async().await);
-                        assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
+                        assert!(
+                            check.fetch_add(1, Relaxed) < Lock::<DefaultConfig>::MAX_SHARED_OWNERS
+                        );
                         check.fetch_sub(1, Relaxed);
                         assert!(lock.release_share());
                     }
@@ -1053,7 +1055,9 @@ async fn lock_chaos() {
                         assert!(lock.release_lock());
                     } else {
                         assert!(lock.share_sync());
-                        assert!(check.fetch_add(1, Relaxed) < Lock::MAX_SHARED_OWNERS);
+                        assert!(
+                            check.fetch_add(1, Relaxed) < Lock::<DefaultConfig>::MAX_SHARED_OWNERS
+                        );
                         check.fetch_sub(1, Relaxed);
                         assert!(lock.release_share());
                     }

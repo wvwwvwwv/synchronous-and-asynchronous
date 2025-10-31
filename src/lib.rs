@@ -4,6 +4,9 @@
 pub mod barrier;
 pub use barrier::Barrier;
 
+pub mod config;
+pub use config::{Config, DefaultConfig};
+
 pub mod gate;
 pub use gate::Gate;
 

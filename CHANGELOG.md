@@ -1,5 +1,9 @@
 # Changelog
 
+6.0.0
+
+* API update: add `Config`.
+
 5.1.0
 
 * API update: add `Barrier`.
