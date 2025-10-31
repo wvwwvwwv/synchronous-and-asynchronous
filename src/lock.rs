@@ -3,20 +3,24 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
+use std::marker::PhantomData;
 use std::pin::{Pin, pin};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release};
+#[cfg(not(feature = "loom"))]
 use std::thread::yield_now;
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
+#[cfg(feature = "loom")]
+use loom::thread::yield_now;
 
+use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
 use crate::wait_queue::{Entry, PinnedEntry, WaitQueue};
-use crate::{Config, DefaultConfig, Pager};
 
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 ///
@@ -26,9 +30,31 @@ use crate::{Config, DefaultConfig, Pager};
 pub struct Lock<C: Config = DefaultConfig> {
     /// [`Lock`] state.
     state: AtomicUsize,
-    /// Configuration.
-    config: C,
+    /// Phantom data for the configuration type.
+    _phantom_config: PhantomData<C>,
 }
+
+/// [`Config`] defines configuration options for [`Lock`].
+pub trait Config: fmt::Debug + Default {
+    /// Defines the number of times to spin before entering a wait queue.
+    #[inline]
+    #[must_use]
+    fn spin_count() -> usize {
+        4096
+    }
+
+    /// Defines the backoff function to use when spinning.
+    #[inline]
+    fn backoff(spin_count: usize) {
+        if spin_count % 64 == 0 {
+            yield_now();
+        }
+    }
+}
+
+/// Default configuration for [`Lock`].
+#[derive(Debug, Default)]
+pub struct DefaultConfig;
 
 /// Operation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,7 +97,7 @@ impl<C: Config> Lock<C> {
     ///
     /// ```
     /// use saa::Lock;
-    /// use saa::config::DefaultConfig;
+    /// use saa::lock::DefaultConfig;
     ///
     /// let lock = Lock::<DefaultConfig>::new();
     /// ```
@@ -80,7 +106,7 @@ impl<C: Config> Lock<C> {
     pub fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
-            config: C::default(),
+            _phantom_config: PhantomData,
         }
     }
 
@@ -728,10 +754,18 @@ impl<C: Config> Lock<C> {
     /// Tries to acquire a shared lock.
     #[inline]
     fn try_share_internal(&self) -> (u8, usize) {
-        let Err(state) = self.state.compare_exchange(0, 1, Acquire, Acquire) else {
+        let Err(mut state) = self.state.compare_exchange(0, 1, Acquire, Acquire) else {
             return (Self::ACQUIRED, 0);
         };
-        self.try_share_internal_slow(state)
+        let mut result = Self::NOT_ACQUIRED;
+        for spin_count in 0..C::spin_count() {
+            (result, state) = self.try_share_internal_slow(state);
+            if result != Self::NOT_ACQUIRED {
+                return (result, state);
+            }
+            C::backoff(spin_count);
+        }
+        (result, state)
     }
 
     /// Tries to acquire a shared lock, slowly.
@@ -820,7 +854,6 @@ impl<C: Config> fmt::Debug for Lock<C> {
             .field("poisoned", &poisoned)
             .field("wait_queue_being_processed", &wait_queue_being_processed)
             .field("wait_queue_tail_addr", &wait_queue_tail_addr)
-            .field("config", &self.config)
             .finish()
     }
 }
@@ -856,3 +889,5 @@ impl<C: Config> SyncResult for Lock<C> {
         )
     }
 }
+
+impl Config for DefaultConfig {}

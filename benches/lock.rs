@@ -133,16 +133,12 @@ macro_rules! multi_threaded_std {
     };
 }
 
-multi_threaded!(multi_threaded_2_1, 2, 1);
 multi_threaded!(multi_threaded_2_256, 2, 256);
 multi_threaded!(multi_threaded_2_65536, 2, 65536);
-multi_threaded!(multi_threaded_8_1, 8, 1);
 multi_threaded!(multi_threaded_8_256, 8, 256);
 multi_threaded!(multi_threaded_8_65536, 8, 65536);
-multi_threaded_std!(multi_threaded_std_2_1, 2, 1);
 multi_threaded_std!(multi_threaded_std_2_256, 2, 256);
 multi_threaded_std!(multi_threaded_std_2_65536, 2, 65536);
-multi_threaded_std!(multi_threaded_std_8_1, 8, 1);
 multi_threaded_std!(multi_threaded_std_8_256, 8, 256);
 multi_threaded_std!(multi_threaded_std_8_65536, 8, 65536);
 
@@ -151,16 +147,12 @@ criterion_group!(
     exclusive_unlock,
     shared_shared_unlock_unlock,
     wait_awake,
-    multi_threaded_2_1,
     multi_threaded_2_256,
     multi_threaded_2_65536,
-    multi_threaded_8_1,
     multi_threaded_8_256,
     multi_threaded_8_65536,
-    multi_threaded_std_2_1,
     multi_threaded_std_2_256,
     multi_threaded_std_2_65536,
-    multi_threaded_std_8_1,
     multi_threaded_std_8_256,
     multi_threaded_std_8_65536,
 );

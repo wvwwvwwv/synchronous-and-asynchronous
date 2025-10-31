@@ -5,7 +5,8 @@ use std::sync::atomic::Ordering::{Relaxed, Release};
 use std::thread;
 use std::time::Duration;
 
-use crate::{Barrier, DefaultConfig, Gate, Lock, Pager, Semaphore, gate, lock};
+use crate::lock::DefaultConfig;
+use crate::{Barrier, Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
