@@ -1,3 +1,4 @@
+use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Release};
@@ -5,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use saa::Lock;
+use saa::{Barrier, Lock};
 
 fn exclusive_unlock(c: &mut Criterion) {
     c.bench_function("lock-exclusive-unlock", |b| {
@@ -58,10 +59,56 @@ fn wait_awake(c: &mut Criterion) {
     });
 }
 
+fn multi_threaded_workload(iters: u64, num_threads: usize, num_cycles: usize) -> Duration {
+    let lock = Arc::new(Lock::default());
+    let mut threads = Vec::with_capacity(num_threads);
+    let barrier = Arc::new(Barrier::with_count(num_threads));
+    for _ in 0..num_threads {
+        let barrier = barrier.clone();
+        let lock = lock.clone();
+        let join = thread::spawn(move || {
+            barrier.wait_sync();
+            let start = Instant::now();
+            for _ in 0..iters {
+                assert!(lock.lock_sync());
+                let acc = black_box({
+                    (black_box(0)..black_box(num_cycles)).fold(black_box(0), |acc, v| acc + v)
+                });
+                assert_eq!(acc, (0..num_cycles).sum::<usize>());
+                assert!(lock.release_lock());
+            }
+            start.elapsed()
+        });
+        threads.push(join);
+    }
+    threads
+        .into_iter()
+        .fold(Duration::from_nanos(0), |acc, t| acc.max(t.join().unwrap()))
+}
+
+macro_rules! multi_threaded {
+    ($name:ident, $num_threads:expr, $num_cycles:expr) => {
+        fn $name(c: &mut Criterion) {
+            c.bench_function(stringify!($name), |b| {
+                b.iter_custom(|iters| multi_threaded_workload(iters, $num_threads, $num_cycles))
+            });
+        }
+    };
+}
+
+multi_threaded!(multi_threaded_2_1, 2, 1);
+multi_threaded!(multi_threaded_2_256, 2, 256);
+multi_threaded!(multi_threaded_8_1, 8, 1);
+multi_threaded!(multi_threaded_8_256, 8, 256);
+
 criterion_group!(
     lock,
     exclusive_unlock,
     shared_shared_unlock_unlock,
-    wait_awake
+    wait_awake,
+    multi_threaded_2_1,
+    multi_threaded_2_256,
+    multi_threaded_8_1,
+    multi_threaded_8_256,
 );
 criterion_main!(lock);
