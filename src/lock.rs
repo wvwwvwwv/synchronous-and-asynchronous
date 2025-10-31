@@ -40,13 +40,13 @@ pub trait Config: fmt::Debug + Default {
     #[inline]
     #[must_use]
     fn spin_count() -> usize {
-        4096
+        256
     }
 
     /// Defines the backoff function to use when spinning.
     #[inline]
     fn backoff(spin_count: usize) {
-        if spin_count % 64 == 0 {
+        if spin_count % 4 == 0 {
             yield_now();
         }
     }
