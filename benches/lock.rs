@@ -5,11 +5,23 @@ use std::sync::atomic::Ordering::{Acquire, Release};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use criterion::async_executor::FuturesExecutor;
 use criterion::{Criterion, criterion_group, criterion_main};
 use saa::{Barrier, Lock};
 
-fn exclusive_unlock(c: &mut Criterion) {
-    c.bench_function("lock-exclusive-unlock", |b| {
+fn exclusive_unlock_async(c: &mut Criterion) {
+    async fn test() {
+        let lock = Lock::default();
+        lock.lock_async().await;
+        assert!(lock.release_lock());
+    }
+    c.bench_function("lock-exclusive-unlock-async", |b| {
+        b.to_async(FuturesExecutor).iter(test);
+    });
+}
+
+fn exclusive_unlock_sync(c: &mut Criterion) {
+    c.bench_function("lock-exclusive-unlock-sync", |b| {
         b.iter(|| {
             let lock = Lock::default();
             lock.lock_sync();
@@ -144,7 +156,8 @@ multi_threaded_std!(multi_threaded_std_8_65536, 8, 65536);
 
 criterion_group!(
     lock,
-    exclusive_unlock,
+    exclusive_unlock_async,
+    exclusive_unlock_sync,
     shared_shared_unlock_unlock,
     wait_awake,
     multi_threaded_2_256,
