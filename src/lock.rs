@@ -3,7 +3,6 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
-use std::marker::PhantomData;
 use std::pin::{Pin, pin};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
@@ -27,34 +26,11 @@ use crate::wait_queue::{Entry, PinnedEntry, WaitQueue};
 /// The locking semantics are similar to [`RwLock`](std::sync::RwLock), however, [`Lock`] only
 /// provides low-level locking and releasing methods, hence forcing the user to manage the scope of
 /// acquired locks and the resources to protect.
-pub struct Lock<C: Config = DefaultConfig> {
+#[derive(Default)]
+pub struct Lock {
     /// [`Lock`] state.
     state: AtomicUsize,
-    /// Phantom data for the configuration type.
-    _phantom_config: PhantomData<C>,
 }
-
-/// [`Config`] defines configuration options for [`Lock`].
-pub trait Config: fmt::Debug + Default {
-    /// Defines the number of times to spin before entering a wait queue.
-    #[inline]
-    #[must_use]
-    fn spin_count() -> usize {
-        256
-    }
-
-    /// Defines the backoff function to use when spinning.
-    #[inline]
-    fn backoff(spin_count: usize) {
-        if spin_count % 4 == 0 {
-            yield_now();
-        }
-    }
-}
-
-/// Default configuration for [`Lock`].
-#[derive(Debug, Default)]
-pub struct DefaultConfig;
 
 /// Operation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,7 +51,7 @@ pub enum Mode {
     WaitShared,
 }
 
-impl<C: Config> Lock<C> {
+impl Lock {
     /// Maximum number of shared owners.
     pub const MAX_SHARED_OWNERS: usize = WaitQueue::DATA_MASK - 1;
 
@@ -90,25 +66,6 @@ impl<C: Config> Lock<C> {
 
     /// Poisoned error code.
     const POISONED: u8 = 2_u8;
-
-    /// Creates a new [`Lock`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use saa::Lock;
-    /// use saa::lock::DefaultConfig;
-    ///
-    /// let lock = Lock::<DefaultConfig>::new();
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            state: AtomicUsize::new(0),
-            _phantom_config: PhantomData,
-        }
-    }
 
     /// Returns `true` if the lock is currently free.
     ///
@@ -677,12 +634,14 @@ impl<C: Config> Lock<C> {
             return (Self::ACQUIRED, 0);
         };
         let mut result = Self::NOT_ACQUIRED;
-        for spin_count in 0..C::spin_count() {
+        for spin_count in 0..128 {
             (result, state) = self.try_lock_internal_slow(state);
             if result != Self::NOT_ACQUIRED {
                 return (result, state);
             }
-            C::backoff(spin_count);
+            if spin_count % 4 == 0 {
+                yield_now();
+            }
         }
         (result, state)
     }
@@ -758,12 +717,14 @@ impl<C: Config> Lock<C> {
             return (Self::ACQUIRED, 0);
         };
         let mut result = Self::NOT_ACQUIRED;
-        for spin_count in 0..C::spin_count() {
+        for spin_count in 0..128 {
             (result, state) = self.try_share_internal_slow(state);
             if result != Self::NOT_ACQUIRED {
                 return (result, state);
             }
-            C::backoff(spin_count);
+            if spin_count % 4 == 0 {
+                yield_now();
+            }
         }
         (result, state)
     }
@@ -831,14 +792,7 @@ impl<C: Config> Lock<C> {
     }
 }
 
-impl Default for Lock<DefaultConfig> {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<C: Config> fmt::Debug for Lock<C> {
+impl fmt::Debug for Lock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.load(Relaxed);
         let lock_share_state = state & WaitQueue::DATA_MASK;
@@ -858,7 +812,7 @@ impl<C: Config> fmt::Debug for Lock<C> {
     }
 }
 
-impl<C: Config> SyncPrimitive for Lock<C> {
+impl SyncPrimitive for Lock {
     #[inline]
     fn state(&self) -> &AtomicUsize {
         &self.state
@@ -875,7 +829,7 @@ impl<C: Config> SyncPrimitive for Lock<C> {
     }
 }
 
-impl<C: Config> SyncResult for Lock<C> {
+impl SyncResult for Lock {
     type Result = Result<bool, pager::Error>;
 
     #[inline]
@@ -889,5 +843,3 @@ impl<C: Config> SyncResult for Lock<C> {
         )
     }
 }
-
-impl Config for DefaultConfig {}
