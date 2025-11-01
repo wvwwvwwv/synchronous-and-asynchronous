@@ -1,5 +1,10 @@
 # Changelog
 
+5.3.0
+
+* API update: remove the `Config` API.
+* Adjust the spin-backoff strategy to outperform `std::sync::Mutex` when mildly contented.
+
 5.2.0
 
 * API update: add `Config`.
