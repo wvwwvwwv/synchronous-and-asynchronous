@@ -30,6 +30,38 @@ fn exclusive_unlock_sync(c: &mut Criterion) {
     });
 }
 
+fn exclusive_unlock_async_with(c: &mut Criterion) {
+    async fn test() {
+        let lock = Lock::default();
+        let mut waited = false;
+        lock.lock_async_with(|| {
+            waited = true;
+            std::thread::yield_now();
+        })
+        .await;
+        assert!(!waited);
+        assert!(lock.release_lock());
+    }
+    c.bench_function("lock-exclusive-unlock-async-with", |b| {
+        b.to_async(FuturesExecutor).iter(test);
+    });
+}
+
+fn exclusive_unlock_sync_with(c: &mut Criterion) {
+    c.bench_function("lock-exclusive-unlock-sync-with", |b| {
+        b.iter(|| {
+            let lock = Lock::default();
+            let mut waited = false;
+            lock.lock_sync_with(|| {
+                waited = true;
+                std::thread::yield_now();
+            });
+            assert!(!waited);
+            assert!(lock.release_lock());
+        });
+    });
+}
+
 fn shared_shared_unlock_unlock(c: &mut Criterion) {
     c.bench_function("share-shared-unlock-unlock", |b| {
         b.iter(|| {
@@ -158,6 +190,8 @@ criterion_group!(
     lock,
     exclusive_unlock_async,
     exclusive_unlock_sync,
+    exclusive_unlock_async_with,
+    exclusive_unlock_sync_with,
     shared_shared_unlock_unlock,
     wait_awake,
     multi_threaded_2_256,

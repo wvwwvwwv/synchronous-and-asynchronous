@@ -660,7 +660,13 @@ impl Lock {
     /// ```
     #[inline]
     pub fn release_share(&self) -> bool {
-        match self.state.compare_exchange(1, 0, Release, Relaxed) {
+        match self.state.fetch_update(Release, Relaxed, |state| {
+            if state != 0 && state <= Self::MAX_SHARED_OWNERS {
+                Some(state - 1)
+            } else {
+                None
+            }
+        }) {
             Ok(_) => true,
             Err(state) => self.release_loop(state, Opcode::Shared),
         }
@@ -715,7 +721,13 @@ impl Lock {
     /// Tries to acquire a shared lock.
     #[inline]
     fn try_share_internal(&self) -> (u8, usize) {
-        let Err(mut state) = self.state.compare_exchange(0, 1, Acquire, Acquire) else {
+        let Err(mut state) = self.state.fetch_update(Acquire, Acquire, |state| {
+            if state < Self::MAX_SHARED_OWNERS {
+                Some(state + 1)
+            } else {
+                None
+            }
+        }) else {
             return (Self::ACQUIRED, 0);
         };
         let mut result = Self::NOT_ACQUIRED;

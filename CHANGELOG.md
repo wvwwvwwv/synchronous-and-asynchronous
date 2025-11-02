@@ -1,5 +1,9 @@
 # Changelog
 
+5.3.1
+
+* Micro optimizations.
+
 5.3.0
 
 * API update: remove the `Config` API.
