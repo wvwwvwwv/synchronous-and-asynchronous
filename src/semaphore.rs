@@ -138,7 +138,25 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async(&self) {
-        self.acquire_async_with_internal(1, || {}).await;
+        self.acquire_many_async_with(1, || {}).await;
+    }
+
+    /// Gets a permit from the semaphore synchronously.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// semaphore.acquire_sync();
+    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
+    /// ```
+    #[inline]
+    pub fn acquire_sync(&self) {
+        self.acquire_many_sync_with(1, || ());
     }
 
     /// Gets a permit from the semaphore asynchronously with a wait callback.
@@ -162,25 +180,7 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_async_with<F: FnOnce()>(&self, begin_wait: F) {
-        self.acquire_async_with_internal(1, begin_wait).await;
-    }
-
-    /// Gets a permit from the semaphore synchronously.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use saa::Semaphore;
-    /// use std::sync::atomic::Ordering::Relaxed;
-    ///
-    /// let semaphore = Semaphore::default();
-    ///
-    /// semaphore.acquire_sync();
-    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 1);
-    /// ```
-    #[inline]
-    pub fn acquire_sync(&self) {
-        self.acquire_many_sync_with(1, || ());
+        self.acquire_many_async_with(1, begin_wait).await;
     }
 
     /// Gets multiple permits from the semaphore synchronously with a wait callback.
@@ -243,7 +243,27 @@ impl Semaphore {
     /// ```
     #[inline]
     pub async fn acquire_many_async(&self, count: usize) -> bool {
-        self.acquire_async_with_internal(count, || {}).await
+        self.acquire_many_async_with(count, || {}).await
+    }
+
+    /// Gets multiple permits from the semaphore synchronously.
+    ///
+    /// Returns `false` if the count exceeds [`Self::MAX_PERMITS`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let semaphore = Semaphore::default();
+    ///
+    /// assert!(semaphore.acquire_many_sync(11));
+    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 11);
+    /// ```
+    #[inline]
+    pub fn acquire_many_sync(&self, count: usize) -> bool {
+        self.acquire_many_sync_with(count, || ())
     }
 
     /// Gets multiple permits from the semaphore asynchronously with a wait callback.
@@ -267,28 +287,37 @@ impl Semaphore {
     /// };
     /// ```
     #[inline]
-    pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) -> bool {
-        self.acquire_async_with_internal(count, begin_wait).await
-    }
+    pub async fn acquire_many_async_with<F: FnOnce()>(
+        &self,
+        count: usize,
+        mut begin_wait: F,
+    ) -> bool {
+        if count > Self::MAX_PERMITS {
+            return false;
+        }
+        let Ok(count) = u8::try_from(count) else {
+            return false;
+        };
+        loop {
+            let (result, state) = self.try_acquire_internal(count);
+            if result {
+                return true;
+            }
 
-    /// Gets multiple permits from the semaphore synchronously.
-    ///
-    /// Returns `false` if the count exceeds [`Self::MAX_PERMITS`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use saa::Semaphore;
-    /// use std::sync::atomic::Ordering::Relaxed;
-    ///
-    /// let semaphore = Semaphore::default();
-    ///
-    /// assert!(semaphore.acquire_many_sync(11));
-    /// assert_eq!(semaphore.available_permits(Relaxed), Semaphore::MAX_PERMITS - 11);
-    /// ```
-    #[inline]
-    pub fn acquire_many_sync(&self, count: usize) -> bool {
-        self.acquire_many_sync_with(count, || ())
+            let async_wait = pin!(WaitQueue::default());
+            async_wait
+                .as_ref()
+                .construct(self, Opcode::Semaphore(count), false);
+            if let Some(returned) =
+                self.try_push_wait_queue_entry(async_wait.as_ref(), state, begin_wait)
+            {
+                begin_wait = returned;
+                continue;
+            }
+
+            PinnedEntry(Pin::new(async_wait.entry())).await;
+            return true;
+        }
     }
 
     /// Gets multiple permits from the semaphore synchronously with a wait callback.
@@ -472,42 +501,6 @@ impl Semaphore {
         {
             Ok(_) => true,
             Err(state) => self.release_loop(state, Opcode::Semaphore(count)),
-        }
-    }
-
-    /// Acquires permits asynchronously.
-    #[inline]
-    async fn acquire_async_with_internal<F: FnOnce()>(
-        &self,
-        count: usize,
-        mut begin_wait: F,
-    ) -> bool {
-        if count > Semaphore::MAX_PERMITS {
-            return false;
-        }
-        let Ok(count) = u8::try_from(count) else {
-            return false;
-        };
-        loop {
-            let (result, state) = self.try_acquire_internal(count);
-            if result {
-                return true;
-            }
-            debug_assert!(state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0);
-
-            let async_wait = pin!(WaitQueue::default());
-            async_wait
-                .as_ref()
-                .construct(self, Opcode::Semaphore(count), false);
-            if let Some(returned) =
-                self.try_push_wait_queue_entry(async_wait.as_ref(), state, begin_wait)
-            {
-                begin_wait = returned;
-                continue;
-            }
-
-            PinnedEntry(Pin::new(async_wait.entry())).await;
-            return true;
         }
     }
 

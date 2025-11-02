@@ -299,42 +299,6 @@ impl Gate {
         pinned_pager.poll_async().await
     }
 
-    /// Enters the [`Gate`] asynchronously with a wait callback.
-    ///
-    /// Returns the current state of the [`Gate`]. The callback is invoked when the task starts
-    /// waiting.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`Error`] if it failed to enter the [`Gate`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use futures::future;
-    /// use saa::Gate;
-    ///
-    /// let gate = Gate::default();
-    ///
-    /// let a = async {
-    ///     let mut wait = false;
-    ///     assert!(gate.enter_async_with(|| wait = true).await.is_ok());
-    /// };
-    /// let b = async {
-    ///    gate.permit();
-    /// };
-    /// future::join(a, b);
-    /// ```
-    #[inline]
-    pub async fn enter_async_with<F: FnOnce()>(&self, begin_wait: F) -> Result<State, Error> {
-        let mut pinned_pager = pin!(Pager::default());
-        pinned_pager
-            .wait_queue()
-            .construct(self, Opcode::Wait(0), false);
-        self.push_wait_queue_entry(&mut pinned_pager, begin_wait);
-        pinned_pager.poll_async().await
-    }
-
     /// Enters the [`Gate`] synchronously.
     ///
     /// Returns the current state of the [`Gate`].
@@ -377,6 +341,42 @@ impl Gate {
     #[inline]
     pub fn enter_sync(&self) -> Result<State, Error> {
         self.enter_sync_with(|| ())
+    }
+
+    /// Enters the [`Gate`] asynchronously with a wait callback.
+    ///
+    /// Returns the current state of the [`Gate`]. The callback is invoked when the task starts
+    /// waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if it failed to enter the [`Gate`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use futures::future;
+    /// use saa::Gate;
+    ///
+    /// let gate = Gate::default();
+    ///
+    /// let a = async {
+    ///     let mut wait = false;
+    ///     assert!(gate.enter_async_with(|| wait = true).await.is_ok());
+    /// };
+    /// let b = async {
+    ///    gate.permit();
+    /// };
+    /// future::join(a, b);
+    /// ```
+    #[inline]
+    pub async fn enter_async_with<F: FnOnce()>(&self, begin_wait: F) -> Result<State, Error> {
+        let mut pinned_pager = pin!(Pager::default());
+        pinned_pager
+            .wait_queue()
+            .construct(self, Opcode::Wait(0), false);
+        self.push_wait_queue_entry(&mut pinned_pager, begin_wait);
+        pinned_pager.poll_async().await
     }
 
     /// Enters the [`Gate`] synchronously with a wait callback.

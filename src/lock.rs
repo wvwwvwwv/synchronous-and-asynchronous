@@ -67,6 +67,9 @@ impl Lock {
     /// Poisoned error code.
     const POISONED: u8 = 2_u8;
 
+    /// Maximum spin count before waiting.
+    const MAX_SPIN_COUNT: usize = 128;
+
     /// Returns `true` if the lock is currently free.
     ///
     /// # Examples
@@ -172,6 +175,28 @@ impl Lock {
         self.lock_async_with(|| {}).await
     }
 
+    /// Acquires an exclusive lock synchronously.
+    ///
+    /// Returns `false` if the lock is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// lock.lock_sync();
+    ///
+    /// assert!(lock.is_locked(Relaxed));
+    /// assert!(!lock.try_share());
+    /// ```
+    #[inline]
+    pub fn lock_sync(&self) -> bool {
+        self.lock_sync_with(|| ())
+    }
+
     /// Acquires an exclusive lock asynchronously with a wait callback.
     ///
     /// Returns `false` if the lock is poisoned. The callback is invoked when the task starts
@@ -217,28 +242,6 @@ impl Lock {
             debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
             return result == Self::ACQUIRED;
         }
-    }
-
-    /// Acquires an exclusive lock synchronously.
-    ///
-    /// Returns `false` if the lock is poisoned.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use saa::Lock;
-    /// use std::sync::atomic::Ordering::Relaxed;
-    ///
-    /// let lock = Lock::default();
-    ///
-    /// lock.lock_sync();
-    ///
-    /// assert!(lock.is_locked(Relaxed));
-    /// assert!(!lock.try_share());
-    /// ```
-    #[inline]
-    pub fn lock_sync(&self) -> bool {
-        self.lock_sync_with(|| ())
     }
 
     /// Acquires an exclusive lock synchronously with a wait callback.
@@ -297,7 +300,9 @@ impl Lock {
     /// ```
     #[inline]
     pub fn try_lock(&self) -> bool {
-        self.try_lock_internal().0 == Self::ACQUIRED
+        self.state
+            .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Acquire)
+            .is_ok()
     }
 
     /// Acquires a shared lock asynchronously.
@@ -321,6 +326,28 @@ impl Lock {
     #[inline]
     pub async fn share_async(&self) -> bool {
         self.share_async_with(|| ()).await
+    }
+
+    /// Acquires a shared lock synchronously.
+    ///
+    /// Returns `false` if the lock is poisoned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    /// use std::sync::atomic::Ordering::Relaxed;
+    ///
+    /// let lock = Lock::default();
+    ///
+    /// lock.share_sync();
+    ///
+    /// assert!(lock.is_shared(Relaxed));
+    /// assert!(!lock.try_lock());
+    /// ```
+    #[inline]
+    pub fn share_sync(&self) -> bool {
+        self.share_sync_with(|| ())
     }
 
     /// Acquires a shared lock asynchronously with a wait callback.
@@ -366,28 +393,6 @@ impl Lock {
             debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
             return result == Self::ACQUIRED;
         }
-    }
-
-    /// Acquires a shared lock synchronously.
-    ///
-    /// Returns `false` if the lock is poisoned.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use saa::Lock;
-    /// use std::sync::atomic::Ordering::Relaxed;
-    ///
-    /// let lock = Lock::default();
-    ///
-    /// lock.share_sync();
-    ///
-    /// assert!(lock.is_shared(Relaxed));
-    /// assert!(!lock.try_lock());
-    /// ```
-    #[inline]
-    pub fn share_sync(&self) -> bool {
-        self.share_sync_with(|| ())
     }
 
     /// Acquires a shared lock synchronously with a wait callback.
@@ -447,7 +452,15 @@ impl Lock {
     /// ```
     #[inline]
     pub fn try_share(&self) -> bool {
-        self.try_share_internal().0 == Self::ACQUIRED
+        self.state
+            .fetch_update(Acquire, Acquire, |state| {
+                if state < Self::MAX_SHARED_OWNERS {
+                    Some(state + 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
     }
 
     /// Registers a [`Pager`] to allow it to get an exclusive lock or a shared lock remotely.
@@ -682,7 +695,7 @@ impl Lock {
             return (Self::ACQUIRED, 0);
         };
         let mut result = Self::NOT_ACQUIRED;
-        for spin_count in 0..128 {
+        for spin_count in 0..Self::MAX_SPIN_COUNT {
             (result, state) = self.try_lock_internal_slow(state);
             if result != Self::NOT_ACQUIRED {
                 return (result, state);
@@ -731,7 +744,7 @@ impl Lock {
             return (Self::ACQUIRED, 0);
         };
         let mut result = Self::NOT_ACQUIRED;
-        for spin_count in 0..128 {
+        for spin_count in 0..Self::MAX_SPIN_COUNT {
             (result, state) = self.try_share_internal_slow(state);
             if result != Self::NOT_ACQUIRED {
                 return (result, state);
