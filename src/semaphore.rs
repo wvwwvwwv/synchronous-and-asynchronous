@@ -287,11 +287,7 @@ impl Semaphore {
     /// };
     /// ```
     #[inline]
-    pub async fn acquire_many_async_with<F: FnOnce()>(
-        &self,
-        count: usize,
-        mut begin_wait: F,
-    ) -> bool {
+    pub async fn acquire_many_async_with<F: FnOnce()>(&self, count: usize, begin_wait: F) -> bool {
         if count > Self::MAX_PERMITS {
             return false;
         }
@@ -308,15 +304,11 @@ impl Semaphore {
             async_wait
                 .as_ref()
                 .construct(self, Opcode::Semaphore(count), false);
-            if let Some(returned) =
-                self.try_push_wait_queue_entry(async_wait.as_ref(), state, begin_wait)
-            {
-                begin_wait = returned;
-                continue;
+            if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
+                begin_wait();
+                PinnedEntry(Pin::new(async_wait.entry())).await;
+                return true;
             }
-
-            PinnedEntry(Pin::new(async_wait.entry())).await;
-            return true;
         }
     }
 
@@ -435,11 +427,7 @@ impl Semaphore {
                 pager.wait_queue().entry().set_result(0);
                 break;
             }
-
-            if self
-                .try_push_wait_queue_entry(pager.wait_queue(), state, || ())
-                .is_none()
-            {
+            if self.try_push_wait_queue_entry(pager.wait_queue(), state) {
                 break;
             }
         }

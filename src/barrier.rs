@@ -192,10 +192,7 @@ impl Barrier {
             if count == 0 {
                 // The counter cannot be decremented, therefore wait for the counter to be reset.
                 wait_queue.construct(self, Opcode::Barrier(true), is_sync);
-                if self
-                    .try_push_wait_queue_entry(pager.wait_queue(), state, || ())
-                    .is_none()
-                {
+                if self.try_push_wait_queue_entry(pager.wait_queue(), state) {
                     return Some(begin_wait);
                 }
                 state = self.state.load(Acquire);

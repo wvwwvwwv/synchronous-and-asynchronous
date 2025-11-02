@@ -510,21 +510,15 @@ impl Gate {
 
     /// Pushes the wait queue entry.
     #[inline]
-    fn push_wait_queue_entry<F: FnOnce()>(
-        &self,
-        pager: &mut Pin<&mut Pager<Self>>,
-        mut begin_wait: F,
-    ) {
+    fn push_wait_queue_entry<F: FnOnce()>(&self, pager: &mut Pin<&mut Pager<Self>>, begin_wait: F) {
         loop {
             let state = self.state.load(Acquire);
             match State::from(state & WaitQueue::DATA_MASK) {
                 State::Controlled => {
-                    if let Some(returned) =
-                        self.try_push_wait_queue_entry(pager.wait_queue(), state, begin_wait)
-                    {
-                        begin_wait = returned;
+                    if !self.try_push_wait_queue_entry(pager.wait_queue(), state) {
                         continue;
                     }
+                    begin_wait();
                 }
                 State::Sealed => {
                     pager

@@ -33,12 +33,7 @@ pub(crate) trait SyncPrimitive: Sized {
 
     /// Tries to push a wait queue entry into the wait queue.
     #[must_use]
-    fn try_push_wait_queue_entry<F: FnOnce()>(
-        &self,
-        wait_queue: Pin<&WaitQueue>,
-        state: usize,
-        begin_wait: F,
-    ) -> Option<F> {
+    fn try_push_wait_queue_entry(&self, wait_queue: Pin<&WaitQueue>, state: usize) -> bool {
         let anchor_ptr = wait_queue.anchor_ptr().0;
         let anchor_addr = anchor_ptr.expose_provenance();
         debug_assert_eq!(anchor_addr & (!WaitQueue::ADDR_MASK), 0);
@@ -57,10 +52,9 @@ pub(crate) trait SyncPrimitive: Sized {
         {
             // The entry cannot be dropped until the result is acknowledged.
             wait_queue.entry().set_pollable();
-            begin_wait();
-            None
+            true
         } else {
-            Some(begin_wait)
+            false
         }
     }
 
@@ -75,12 +69,12 @@ pub(crate) trait SyncPrimitive: Sized {
 
         let pinned_wait_queue = pin!(WaitQueue::default());
         pinned_wait_queue.as_ref().construct(self, opcode, true);
-        if let Some(returned) =
-            self.try_push_wait_queue_entry(pinned_wait_queue.as_ref(), state, begin_wait)
-        {
-            return Err(returned);
+        if self.try_push_wait_queue_entry(pinned_wait_queue.as_ref(), state) {
+            begin_wait();
+            Ok(pinned_wait_queue.entry().poll_result_sync())
+        } else {
+            Err(begin_wait)
         }
-        Ok(pinned_wait_queue.entry().poll_result_sync())
     }
 
     /// Releases the resource represented by the supplied operation mode.

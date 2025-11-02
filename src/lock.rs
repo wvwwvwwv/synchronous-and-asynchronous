@@ -217,7 +217,7 @@ impl Lock {
     /// };
     /// ```
     #[inline]
-    pub async fn lock_async_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
+    pub async fn lock_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
         loop {
             let (mut result, state) = self.try_lock_internal();
             if result == Self::ACQUIRED {
@@ -231,16 +231,12 @@ impl Lock {
             async_wait
                 .as_ref()
                 .construct(self, Opcode::Exclusive, false);
-            if let Some(returned) =
-                self.try_push_wait_queue_entry(async_wait.as_ref(), state, begin_wait)
-            {
-                begin_wait = returned;
-                continue;
+            if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
+                begin_wait();
+                result = PinnedEntry(Pin::new(async_wait.entry())).await;
+                debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
+                return result == Self::ACQUIRED;
             }
-
-            result = PinnedEntry(Pin::new(async_wait.entry())).await;
-            debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
-            return result == Self::ACQUIRED;
         }
     }
 
@@ -370,7 +366,7 @@ impl Lock {
     /// };
     /// ```
     #[inline]
-    pub async fn share_async_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
+    pub async fn share_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
         loop {
             let (mut result, state) = self.try_share_internal();
             if result == Self::ACQUIRED {
@@ -382,16 +378,12 @@ impl Lock {
 
             let async_wait = pin!(WaitQueue::default());
             async_wait.as_ref().construct(self, Opcode::Shared, false);
-            if let Some(returned) =
-                self.try_push_wait_queue_entry(async_wait.as_ref(), state, begin_wait)
-            {
-                begin_wait = returned;
-                continue;
+            if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
+                begin_wait();
+                result = PinnedEntry(Pin::new(async_wait.entry())).await;
+                debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
+                return result == Self::ACQUIRED;
             }
-
-            result = PinnedEntry(Pin::new(async_wait.entry())).await;
-            debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
-            return result == Self::ACQUIRED;
         }
     }
 
@@ -531,10 +523,7 @@ impl Lock {
                 break;
             }
 
-            if self
-                .try_push_wait_queue_entry(pager.wait_queue(), state, || ())
-                .is_none()
-            {
+            if self.try_push_wait_queue_entry(pager.wait_queue(), state) {
                 break;
             }
         }
