@@ -45,7 +45,7 @@ fn lock_exclusive() {
         let lock = Arc::new(Lock::default());
         let check = Arc::new(AtomicBool::new(false));
 
-        lock.share_sync();
+        lock.lock_sync();
 
         let lock_clone = lock.clone();
         let check_clone = check.clone();
@@ -64,7 +64,7 @@ fn lock_exclusive() {
         });
 
         check.store(true, Relaxed);
-        assert!(lock.release_share());
+        assert!(lock.release_lock());
         assert!(thread_1.join().is_ok());
         assert!(thread_2.join().is_ok());
     });

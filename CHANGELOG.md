@@ -2,7 +2,7 @@
 
 5.3.1
 
-* Micro optimizations.
+* Micro optimization.
 
 5.3.0
 
