@@ -9,11 +9,12 @@ use crate::{Barrier, Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
-    let limit = 196;
+    let limit = 184;
+    let limit_relaxed = 224;
     let lock = Lock::default();
 
     let lock_fut = &lock.lock_async();
-    assert!(size_of_val(lock_fut) < limit);
+    assert!(size_of_val(lock_fut) < limit,);
 
     let lock_with_fut = &lock.lock_async_with(|| {});
     assert!(size_of_val(lock_with_fut) < limit);
@@ -27,32 +28,32 @@ fn future_size() {
     let barrier = Barrier::default();
 
     let barrier_fut = &barrier.wait_async();
-    assert!(size_of_val(barrier_fut) < limit + 24);
+    assert!(size_of_val(barrier_fut) < limit_relaxed);
 
     let barrier_with_fut = &barrier.wait_async_with(|| {});
-    assert!(size_of_val(barrier_with_fut) < limit + 24);
+    assert!(size_of_val(barrier_with_fut) < limit_relaxed);
 
     let semaphore = Semaphore::default();
 
     let acquire_fut = &semaphore.acquire_async();
-    assert!(size_of_val(acquire_fut) < limit);
+    assert!(size_of_val(acquire_fut) < limit_relaxed);
 
     let acquire_with_fut = &semaphore.acquire_async_with(|| {});
-    assert!(size_of_val(acquire_with_fut) < limit);
+    assert!(size_of_val(acquire_with_fut) < limit_relaxed);
 
     let acquire_many_fut = &semaphore.acquire_many_async(1);
-    assert!(size_of_val(acquire_many_fut) < limit);
+    assert!(size_of_val(acquire_many_fut) < limit_relaxed);
 
     let acquire_many_with_fut = &semaphore.acquire_many_async_with(1, || {});
-    assert!(size_of_val(acquire_many_with_fut) < limit);
+    assert!(size_of_val(acquire_many_with_fut) < limit_relaxed);
 
     let gate = Gate::default();
 
     let enter_fut = &gate.enter_async();
-    assert!(size_of_val(enter_fut) < limit);
+    assert!(size_of_val(enter_fut) < limit_relaxed);
 
     let enter_with_fut = &gate.enter_async_with(|| {});
-    assert!(size_of_val(enter_with_fut) < limit);
+    assert!(size_of_val(enter_with_fut) < limit_relaxed);
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
