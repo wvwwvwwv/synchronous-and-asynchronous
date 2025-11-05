@@ -5,10 +5,13 @@ use std::ptr::{addr_of, null, with_exposed_provenance};
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use std::thread;
+#[cfg(not(feature = "loom"))]
+use std::thread::yield_now;
 
 #[cfg(feature = "loom")]
 use loom::sync::atomic::AtomicUsize;
+#[cfg(feature = "loom")]
+use loom::thread::yield_now;
 
 use crate::opcode::Opcode;
 use crate::wait_queue::{Entry, WaitQueue};
@@ -281,7 +284,7 @@ pub(crate) trait SyncPrimitive: Sized {
         loop {
             if state & WaitQueue::LOCKED_FLAG == WaitQueue::LOCKED_FLAG {
                 // Another thread is processing the wait queue.
-                thread::yield_now();
+                yield_now();
                 state = this.state().load(Acquire);
             } else if state & WaitQueue::ADDR_MASK == 0 {
                 // The wait queue is empty.
@@ -311,7 +314,7 @@ pub(crate) trait SyncPrimitive: Sized {
         if need_completion {
             // The entry was removed by another thread, so it will be completed.
             while !entry.result_finalized() {
-                thread::yield_now();
+                yield_now();
             }
             this.release_loop(state, entry.opcode());
         }
