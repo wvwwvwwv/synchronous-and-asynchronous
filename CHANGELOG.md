@@ -1,5 +1,9 @@
 # Changelog
 
+5.3.3
+
+* Minor optimization.
+
 5.3.2
 
 * Optimize `Lock::try_*` methods.

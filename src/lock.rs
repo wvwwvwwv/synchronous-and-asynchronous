@@ -219,7 +219,7 @@ impl Lock {
     #[inline]
     pub async fn lock_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
         loop {
-            let (mut result, state) = self.try_lock_internal();
+            let (mut result, state) = self.try_lock_internal_spin();
             if result == Self::ACQUIRED {
                 return true;
             } else if result == Self::POISONED {
@@ -261,7 +261,7 @@ impl Lock {
     #[inline]
     pub fn lock_sync_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
         loop {
-            let (result, state) = self.try_lock_internal();
+            let (result, state) = self.try_lock_internal_spin();
             if result == Self::ACQUIRED {
                 return true;
             } else if result == Self::POISONED {
@@ -296,9 +296,7 @@ impl Lock {
     /// ```
     #[inline]
     pub fn try_lock(&self) -> bool {
-        self.state
-            .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Acquire)
-            .is_ok()
+        self.try_lock_internal(self.state.load(Acquire)).0 == Self::ACQUIRED
     }
 
     /// Acquires a shared lock asynchronously.
@@ -368,7 +366,7 @@ impl Lock {
     #[inline]
     pub async fn share_async_with<F: FnOnce()>(&self, begin_wait: F) -> bool {
         loop {
-            let (mut result, state) = self.try_share_internal();
+            let (mut result, state) = self.try_share_internal_spin();
             if result == Self::ACQUIRED {
                 return true;
             } else if result == Self::POISONED {
@@ -408,7 +406,7 @@ impl Lock {
     #[inline]
     pub fn share_sync_with<F: FnOnce()>(&self, mut begin_wait: F) -> bool {
         loop {
-            let (result, state) = self.try_share_internal();
+            let (result, state) = self.try_share_internal_spin();
             if result == Self::ACQUIRED {
                 return true;
             } else if result == Self::POISONED {
@@ -444,15 +442,7 @@ impl Lock {
     /// ```
     #[inline]
     pub fn try_share(&self) -> bool {
-        self.state
-            .fetch_update(Acquire, Acquire, |state| {
-                if state < Self::MAX_SHARED_OWNERS {
-                    Some(state + 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok()
+        self.try_share_internal(self.state.load(Acquire)).0 == Self::ACQUIRED
     }
 
     /// Registers a [`Pager`] to allow it to get an exclusive lock or a shared lock remotely.
@@ -500,8 +490,8 @@ impl Lock {
 
         loop {
             let (result, state) = match mode {
-                Mode::Exclusive => self.try_lock_internal(),
-                Mode::Shared => self.try_share_internal(),
+                Mode::Exclusive => self.try_lock_internal_spin(),
+                Mode::Shared => self.try_share_internal_spin(),
                 Mode::WaitExclusive | Mode::WaitShared => {
                     let state = self.state.load(Acquire);
                     let result = if state == usize::from(Self::POISONED) {
@@ -674,9 +664,9 @@ impl Lock {
         }
     }
 
-    /// Tries to acquire an exclusive lock.
+    /// Tries to acquire an exclusive lock with spin-backoff.
     #[inline]
-    fn try_lock_internal(&self) -> (u8, usize) {
+    fn try_lock_internal_spin(&self) -> (u8, usize) {
         let Err(mut state) = self
             .state
             .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Acquire)
@@ -685,7 +675,7 @@ impl Lock {
         };
         let mut result = Self::NOT_ACQUIRED;
         for spin_count in 0..Self::MAX_SPIN_COUNT {
-            (result, state) = self.try_lock_internal_slow(state);
+            (result, state) = self.try_lock_internal(state);
             if result != Self::NOT_ACQUIRED {
                 return (result, state);
             }
@@ -696,33 +686,28 @@ impl Lock {
         (result, state)
     }
 
-    /// Tries to acquire an exclusive lock, slowly.
-    fn try_lock_internal_slow(&self, mut state: usize) -> (u8, usize) {
+    /// Tries to acquire an exclusive lock.
+    #[inline]
+    fn try_lock_internal(&self, mut state: usize) -> (u8, usize) {
         loop {
             if state == Self::POISONED_STATE {
                 return (Self::POISONED, state);
-            } else if state & WaitQueue::ADDR_MASK != 0 || state & WaitQueue::DATA_MASK != 0 {
-                // There is a waiting thread, so this thread should not acquire the lock.
+            } else if state != 0 {
                 return (Self::NOT_ACQUIRED, state);
             }
-
-            if state & WaitQueue::DATA_MASK == 0 {
-                match self.state.compare_exchange(
-                    state,
-                    state | WaitQueue::DATA_MASK,
-                    Acquire,
-                    Acquire,
-                ) {
-                    Ok(_) => return (Self::ACQUIRED, 0),
-                    Err(new_state) => state = new_state,
-                }
+            match self
+                .state
+                .compare_exchange(0, WaitQueue::DATA_MASK, Acquire, Acquire)
+            {
+                Ok(_) => return (Self::ACQUIRED, 0),
+                Err(new_state) => state = new_state,
             }
         }
     }
 
-    /// Tries to acquire a shared lock.
+    /// Tries to acquire a shared lock with spin-backoff.
     #[inline]
-    fn try_share_internal(&self) -> (u8, usize) {
+    fn try_share_internal_spin(&self) -> (u8, usize) {
         let Err(mut state) = self.state.fetch_update(Acquire, Acquire, |state| {
             if state < Self::MAX_SHARED_OWNERS {
                 Some(state + 1)
@@ -734,7 +719,7 @@ impl Lock {
         };
         let mut result = Self::NOT_ACQUIRED;
         for spin_count in 0..Self::MAX_SPIN_COUNT {
-            (result, state) = self.try_share_internal_slow(state);
+            (result, state) = self.try_share_internal(state);
             if result != Self::NOT_ACQUIRED {
                 return (result, state);
             }
@@ -745,18 +730,15 @@ impl Lock {
         (result, state)
     }
 
-    /// Tries to acquire a shared lock, slowly.
-    fn try_share_internal_slow(&self, mut state: usize) -> (u8, usize) {
+    /// Tries to acquire a shared lock.
+    #[inline]
+    fn try_share_internal(&self, mut state: usize) -> (u8, usize) {
         loop {
             if state == Self::POISONED_STATE {
                 return (Self::POISONED, state);
-            } else if state & WaitQueue::ADDR_MASK != 0
-                || state & WaitQueue::DATA_MASK >= Self::MAX_SHARED_OWNERS
-            {
-                // There is a waiting thread, or the lock can no longer be shared.
+            } else if state >= Self::MAX_SHARED_OWNERS {
                 return (Self::NOT_ACQUIRED, state);
             }
-
             match self
                 .state
                 .compare_exchange(state, state + 1, Acquire, Acquire)

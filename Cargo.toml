@@ -2,7 +2,7 @@
 name = "saa"
 description = "Word-sized low-level synchronization primitives providing both asynchronous and synchronous interfaces."
 documentation = "https://docs.rs/saa"
-version = "5.3.2"
+version = "5.3.3"
 authors = ["wvwwvwwv <wvwwvwwv@me.com>"]
 edition = "2024"
 rust-version = "1.85.0"
