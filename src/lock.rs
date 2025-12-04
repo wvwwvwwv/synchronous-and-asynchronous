@@ -70,6 +70,23 @@ impl Lock {
     /// Maximum spin count before waiting.
     const MAX_SPIN_COUNT: usize = 128;
 
+    /// Creates a new [`Lock`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Lock;
+    ///
+    /// let lock = Lock::new();
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
     /// Returns `true` if the lock is currently free.
     ///
     /// # Examples

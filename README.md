@@ -11,14 +11,12 @@ Word-sized low-level synchronization primitives providing both asynchronous and 
 - No heap allocation.
 - No hidden global variables.
 - Provides both asynchronous and synchronous interfaces.
-- Small memory footprint.
+- [`lock_api`](https://crates.io/crates/lock_api) support: `features = ["lock_api"]`.
 - [`Loom`](https://github.com/tokio-rs/loom) support: `features = ["loom"]`.
 
 ## Lock
 
 `saa::Lock` is a low-level shared-exclusive lock providing both asynchronous and synchronous interfaces. Synchronous locking methods such as `lock_sync` and `share_sync` can be used alongside their asynchronous counterparts `lock_async` and `share_async` simultaneously. `saa::Lock` implements an allocation-free fair wait queue shared between both synchronous and asynchronous methods.
-
-### Examples
 
 ```rust
 use saa::Lock;
@@ -34,9 +32,50 @@ assert!(!lock.release_share());
 assert!(lock.release_lock());
 
 async {
-    lock.share_async();
+    lock.share_async().await;
     assert!(lock.release_share());
 };
+```
+
+### [`lock_api`](https://crates.io/crates/lock_api) support
+
+```rust
+#[cfg(feature = "lock_api")]
+use saa::{Mutex, RwLock, lock_async, read_async, write_async};
+
+#[cfg(feature = "lock_api")]
+fn example() {
+    let mutex: Mutex<usize> = Mutex::new(0);
+    let rwlock: RwLock<usize> = RwLock::new(0);
+    
+    let mut mutex_guard = mutex.lock();
+    assert_eq!(*mutex_guard, 0);
+    *mutex_guard += 1;
+    assert_eq!(*mutex_guard, 1);
+    drop(mutex_guard);
+    
+    let mut writer_guard = rwlock.write();
+    assert_eq!(*writer_guard, 0);
+    *writer_guard += 1;
+    drop(writer_guard);
+    
+    let read_guard = rwlock.read();
+    assert_eq!(*read_guard, 1);
+    
+    async {
+        let mutex_guard = lock_async(&mutex).await;
+        assert_eq!(*mutex_guard, 1);
+        drop(mutex_guard);
+        
+        let mut writer_guard = write_async(&rwlock).await;
+        *writer_guard += 1;
+        drop(writer_guard);
+        
+        let reader_guard = read_async(&rwlock).await;
+        assert_eq!(*reader_guard, 2);
+        drop(reader_guard);
+    };
+}
 ```
 
 ## Barrier
@@ -71,8 +110,6 @@ for thread in threads {
 
 `saa::Semaphore` is a synchronization primitive that allows a fixed number of threads to access a resource concurrently.
 
-### Examples
-
 ```rust
 use saa::Semaphore;
 
@@ -96,8 +133,6 @@ async {
 ## Gate
 
 `saa::Gate` is an unbounded barrier that can be opened or sealed manually as needed.
-
-### Examples
 
 ```rust
 use std::sync::Arc;
@@ -132,8 +167,6 @@ for thread in threads {
 ## Pager
 
 `saa::Pager` enables remotely waiting for a resource to become available.
-
-### Examples
 
 ```rust
 use std::pin::pin;

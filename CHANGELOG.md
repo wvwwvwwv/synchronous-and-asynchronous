@@ -1,5 +1,9 @@
 # Changelog
 
+5.4.0
+
+* Add support for [`lock_api`](https://crates.io/crates/lock_api) to `Lock`.
+
 5.3.3
 
 * Minor optimization.

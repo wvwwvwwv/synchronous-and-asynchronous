@@ -58,6 +58,8 @@ jobs:
           rustup component add miri --toolchain nightly
       - name: Miri
         run: cargo +nightly miri test
+      - name: lock_api
+        run: cargo test --features lock_api -- --nocapture
       - name: Loom
         run: cargo test --features loom --release --lib -- --nocapture
   check-misc:
