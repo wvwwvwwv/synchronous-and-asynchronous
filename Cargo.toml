@@ -24,7 +24,7 @@ lock_api = ["dep:lock_api"]
 loom = ["dep:loom"]
 
 [dev-dependencies]
-criterion = { version = "0.7", features = ["async_futures"] }
+criterion = { version = "0.8", features = ["async_futures"] }
 futures = "0.3"
 tokio = { version = "1.48", features = ["full"] }
 

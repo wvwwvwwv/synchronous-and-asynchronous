@@ -37,10 +37,7 @@ assert!(lock.lock_sync());
 
 // `Lock` can be poisoned.
 assert!(lock.poison_lock());
-
 assert!(!lock.lock_sync());
-
-// Clear the poisoned state.    
 assert!(lock.clear_poison());
 
 async {
@@ -71,10 +68,10 @@ fn example() {
     assert_eq!(*mutex_guard, 1);
     drop(mutex_guard);
     
-    let mut writer_guard = rwlock.write();
-    assert_eq!(*writer_guard, 0);
-    *writer_guard += 1;
-    drop(writer_guard);
+    let mut write_guard = rwlock.write();
+    assert_eq!(*write_guard, 0);
+    *write_guard += 1;
+    drop(write_guard);
     
     let read_guard = rwlock.read();
     assert_eq!(*read_guard, 1);
@@ -85,9 +82,9 @@ fn example() {
         assert_eq!(*mutex_guard, 1);
         drop(mutex_guard);
         
-        let mut writer_guard = write_async(&rwlock).await;
-        *writer_guard += 1;
-        drop(writer_guard);
+        let mut write_guard = write_async(&rwlock).await;
+        *write_guard += 1;
+        drop(write_guard);
         
         let reader_guard = read_async(&rwlock).await;
         assert_eq!(*reader_guard, 2);
