@@ -21,19 +21,34 @@ Word-sized low-level synchronization primitives providing both asynchronous and 
 ```rust
 use saa::Lock;
 
+// At most `62` concurrent shared owners are allowed.
+assert_eq!(Lock::MAX_SHARED_OWNERS, 62);
+
 let lock = Lock::default();
 
-lock.lock_sync();
-
+assert!(lock.lock_sync());
 assert!(!lock.try_lock());
 assert!(!lock.try_share());
 
 assert!(!lock.release_share());
 assert!(lock.release_lock());
 
+assert!(lock.lock_sync());
+
+// `Lock` can be poisoned.
+assert!(lock.poison_lock());
+
+assert!(!lock.lock_sync());
+
+// Clear the poisoned state.    
+assert!(lock.clear_poison());
+
 async {
-    lock.share_async().await;
+    assert!(lock.share_async().await);
     assert!(lock.release_share());
+    
+    assert!(lock.lock_async().await);
+    assert!(lock.release_lock());
 };
 ```
 
@@ -63,6 +78,7 @@ fn example() {
     
     let read_guard = rwlock.read();
     assert_eq!(*read_guard, 1);
+    drop(read_guard);
     
     async {
         let mutex_guard = lock_async(&mutex).await;
@@ -90,6 +106,9 @@ use std::thread;
 
 use saa::Barrier;
 
+// At most `63` concurrent tasks/threads can be synchronized.
+assert_eq!(Barrier::MAX_TASKS, 63);
+
 let barrier = Arc::new(Barrier::with_count(8));
 
 let mut threads = Vec::new();
@@ -114,6 +133,9 @@ for thread in threads {
 
 ```rust
 use saa::Semaphore;
+
+// At most `63` concurrent tasks/threads can be synchronized.
+assert_eq!(Semaphore::MAX_PERMITS, 63);
 
 let semaphore = Semaphore::default();
 

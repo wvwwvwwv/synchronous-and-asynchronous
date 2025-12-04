@@ -26,6 +26,7 @@ pub type Mutex<T> = lock_api::Mutex<Lock, T>;
 ///     let mut guard: MutexGuard<usize> = lock_async(&mutex).await;
 /// };
 /// ```
+#[inline]
 pub async fn lock_async<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     unsafe {
         mutex.raw().lock_async().await;
@@ -33,7 +34,7 @@ pub async fn lock_async<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// An RAII implementation of a scoped mutex.
+/// A scoped mutex guard.
 ///
 /// # Examples
 ///
@@ -60,7 +61,7 @@ pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, Lock, T>;
 /// ```
 pub type RwLock<T> = lock_api::RwLock<Lock, T>;
 
-/// An RAII implementation of a scoped read lock.
+/// A scoped read lock.
 ///
 /// # Examples
 ///
@@ -86,6 +87,7 @@ pub type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, Lock, T>;
 ///     let guard: RwLockReadGuard<usize> = read_async(&rwlock).await;
 /// };
 /// ```
+#[inline]
 pub async fn read_async<T>(rwlock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     unsafe {
         rwlock.raw().share_async().await;
@@ -93,7 +95,7 @@ pub async fn read_async<T>(rwlock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     }
 }
 
-/// An RAII implementation of a scoped write lock.
+/// A scoped write lock.
 ///
 /// # Examples
 ///
@@ -122,6 +124,7 @@ pub type RwLockWriteGuard<'a, T> = lock_api::RwLockWriteGuard<'a, Lock, T>;
 ///     let guard: RwLockWriteGuard<usize> = write_async(&rwlock).await;
 /// };
 /// ```
+#[inline]
 pub async fn write_async<T>(rwlock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     unsafe {
         rwlock.raw().lock_async().await;
