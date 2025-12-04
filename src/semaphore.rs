@@ -30,6 +30,34 @@ impl Semaphore {
     /// Maximum number of concurrent owners.
     pub const MAX_PERMITS: usize = WaitQueue::DATA_MASK;
 
+    /// Creates a new [`Semaphore`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Semaphore;
+    ///
+    /// let semaphore = Semaphore::new();
+    /// ```
+    #[cfg(not(feature = "loom"))]
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
+    /// Creates a new [`Semaphore`].
+    #[cfg(feature = "loom")]
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
     /// Creates a new [`Semaphore`] with the given number of initially available permits.
     ///
     /// The maximum number of available permits is [`MAX_PERMITS`](Self::MAX_PERMITS), and if a

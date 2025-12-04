@@ -69,6 +69,34 @@ impl Gate {
     /// Mask to get the state value from `u8`.
     const STATE_MASK: u8 = 0b11;
 
+    /// Creates a new [`Gate`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use saa::Gate;
+    ///
+    /// let gate = Gate::new();
+    /// ```
+    #[cfg(not(feature = "loom"))]
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
+    /// Creates a new [`Gate`].
+    #[cfg(feature = "loom")]
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
     /// Returns the current state of the [`Gate`].
     ///
     /// # Examples
