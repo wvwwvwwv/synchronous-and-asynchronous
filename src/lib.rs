@@ -10,9 +10,9 @@ pub use gate::Gate;
 pub mod lock;
 pub use lock::Lock;
 
-#[cfg(feature = "lock_api")]
+#[cfg(all(feature = "lock_api", not(feature = "loom")))]
 pub mod lock_api;
-#[cfg(feature = "lock_api")]
+#[cfg(all(feature = "lock_api", not(feature = "loom")))]
 pub use lock_api::{
     Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, lock_async, read_async,
     write_async,

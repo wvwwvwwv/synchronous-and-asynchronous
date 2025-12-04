@@ -39,11 +39,13 @@ async {
 
 ### [`lock_api`](https://crates.io/crates/lock_api) support
 
+The `lock_api` feature is automatically disabled when the `loom` feature is enabled since `loom` atomic types cannot be instantiated in const contexts.
+
 ```rust
-#[cfg(feature = "lock_api")]
+#[cfg(all(feature = "lock_api", not(feature = "loom")))]
 use saa::{Mutex, RwLock, lock_async, read_async, write_async};
 
-#[cfg(feature = "lock_api")]
+#[cfg(all(feature = "lock_api", not(feature = "loom")))]
 fn example() {
     let mutex: Mutex<usize> = Mutex::new(0);
     let rwlock: RwLock<usize> = RwLock::new(0);

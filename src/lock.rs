@@ -79,9 +79,20 @@ impl Lock {
     ///
     /// let lock = Lock::new();
     /// ```
+    #[cfg(not(feature = "loom"))]
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
+    /// Creates a new [`Lock`].
+    #[cfg(feature = "loom")]
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
         }
