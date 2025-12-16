@@ -16,7 +16,7 @@ use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
-use crate::wait_queue::{AwaitableEntry, Entry, WaitQueue};
+use crate::wait_queue::{Entry, WaitQueue};
 
 /// [`Semaphore`] is a synchronization primitive that allows a fixed number of threads to access a
 /// resource concurrently.
@@ -334,7 +334,7 @@ impl Semaphore {
                 .construct(self, Opcode::Semaphore(count), false);
             if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
                 begin_wait();
-                AwaitableEntry(async_wait.entry()).await;
+                async_wait.as_ref().await;
                 return true;
             }
         }

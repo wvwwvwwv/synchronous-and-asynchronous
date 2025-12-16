@@ -19,7 +19,7 @@ use crate::Pager;
 use crate::opcode::Opcode;
 use crate::pager::{self, SyncResult};
 use crate::sync_primitive::SyncPrimitive;
-use crate::wait_queue::{AwaitableEntry, Entry, WaitQueue};
+use crate::wait_queue::{Entry, WaitQueue};
 
 /// [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 ///
@@ -261,7 +261,7 @@ impl Lock {
                 .construct(self, Opcode::Exclusive, false);
             if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
                 begin_wait();
-                result = AwaitableEntry(async_wait.entry()).await;
+                result = async_wait.as_ref().await;
                 debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
                 return result == Self::ACQUIRED;
             }
@@ -406,7 +406,7 @@ impl Lock {
             async_wait.as_ref().construct(self, Opcode::Shared, false);
             if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
                 begin_wait();
-                result = AwaitableEntry(async_wait.entry()).await;
+                result = async_wait.as_ref().await;
                 debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
                 return result == Self::ACQUIRED;
             }

@@ -72,30 +72,13 @@ pub(crate) struct Entry {
     offset: u16,
 }
 
-/// Helper struct for awaiting a [`WaitQueue`] without consuming it.
-pub(crate) struct AwaitableEntry<'e>(pub(crate) Pin<&'e Entry>);
-
-/// Contextual data for asynchronous [`WaitQueue`].
-#[derive(Debug)]
-struct AsyncContext {
-    /// Waker to wake an executor when the result is ready.
-    waker: UnsafeCell<Option<Waker>>,
-}
-
-/// Contextual data for synchronous [`WaitQueue`].
-#[derive(Debug)]
-struct SyncContext {
-    /// Waker to wake an executor when the result is ready.
-    thread: UnsafeCell<Option<Thread>>,
-}
-
 /// Monitors the result.
 #[derive(Debug)]
 enum Monitor {
     /// Monitors asynchronously.
-    Async(AsyncContext),
+    Async(UnsafeCell<Option<Waker>>),
     /// Monitors synchronously.
-    Sync(SyncContext),
+    Sync(UnsafeCell<Option<Thread>>),
 }
 
 /// Static assertions.
@@ -142,13 +125,9 @@ impl WaitQueue {
         };
         let entry_ptr = Self::to_entry_ptr(anchor_ptr).cast_mut();
         let monitor = if is_sync {
-            Monitor::Sync(SyncContext {
-                thread: UnsafeCell::new(None),
-            })
+            Monitor::Sync(UnsafeCell::new(None))
         } else {
-            Monitor::Async(AsyncContext {
-                waker: UnsafeCell::new(None),
-            })
+            Monitor::Async(UnsafeCell::new(None))
         };
         unsafe {
             if had_entry {
@@ -198,8 +177,8 @@ impl WaitQueue {
 
     /// Returns a reference to the entry.
     #[inline]
-    pub(crate) fn entry(&self) -> Pin<&Entry> {
-        unsafe { Pin::new(&*Self::to_entry_ptr(self.anchor_ptr().0)) }
+    pub(crate) fn entry(&self) -> &Entry {
+        unsafe { &*Self::to_entry_ptr(self.anchor_ptr().0) }
     }
 
     /// Returns the entry pointer derived from the anchor pointer.
@@ -286,6 +265,15 @@ impl Drop for WaitQueue {
         unsafe {
             entry_ptr.drop_in_place();
         }
+    }
+}
+
+impl Future for Pin<&'_ WaitQueue> {
+    type Output = u8;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.entry().poll_result_async(cx)
     }
 }
 
@@ -467,15 +455,15 @@ impl Entry {
             // A waker had been set before the result was set.
             unsafe {
                 match &self.monitor {
-                    Monitor::Async(async_context) => {
-                        if let Some(waker) = (*async_context.waker.get()).take() {
+                    Monitor::Async(waker) => {
+                        if let Some(waker) = (*waker.get()).take() {
                             self.state.fetch_or(Self::RESULT_FINALIZED, AcqRel);
                             waker.wake();
                             return;
                         }
                     }
-                    Monitor::Sync(sync_context) => {
-                        if let Some(thread) = (*sync_context.thread.get()).take() {
+                    Monitor::Sync(thread) => {
+                        if let Some(thread) = (*thread.get()).take() {
                             self.state.fetch_or(Self::RESULT_FINALIZED, AcqRel);
                             thread.unpark();
                             return;
@@ -487,56 +475,9 @@ impl Entry {
         self.state.fetch_or(Self::RESULT_FINALIZED, AcqRel);
     }
 
-    /// Polls the result, asynchronously.
-    pub(crate) fn poll_result_async(&self, cx: &mut Context<'_>) -> Poll<u8> {
-        let Monitor::Async(async_context) = &self.monitor else {
-            return Poll::Ready(Self::ERROR_WRONG_MODE);
-        };
-
-        if let Some(result) = self.try_consume_result() {
-            return Poll::Ready(result);
-        }
-
-        let mut this_waker = None;
-        let state = self.state.load(Acquire);
-        if state & Self::RESULT_SET == Self::RESULT_SET {
-            // No need to install the waker.
-            if let Some(result) = self.try_consume_result() {
-                return Poll::Ready(result);
-            }
-        } else if state & Self::WAKER_SET == Self::WAKER_SET {
-            // Replace the waker by clearing the flag first.
-            if self
-                .state
-                .compare_exchange_weak(state, state & !Self::WAKER_SET, AcqRel, Acquire)
-                .is_ok()
-            {
-                this_waker.replace(cx.waker().clone());
-            }
-        } else {
-            this_waker.replace(cx.waker().clone());
-        }
-
-        if let Some(waker) = this_waker {
-            unsafe {
-                (*async_context.waker.get()).replace(waker);
-            }
-            if self.state.fetch_or(Self::WAKER_SET, Release) & Self::RESULT_SET == Self::RESULT_SET
-            {
-                // The result has been set, so the waker will not be notified.
-                cx.waker().wake_by_ref();
-            }
-        } else {
-            // The waker is not set, so we need to wake the task.
-            cx.waker().wake_by_ref();
-        }
-
-        Poll::Pending
-    }
-
     /// Polls the result, synchronously.
     pub(crate) fn poll_result_sync(&self) -> u8 {
-        let Monitor::Sync(sync_context) = &self.monitor else {
+        let Monitor::Sync(thread) = &self.monitor else {
             return Self::ERROR_WRONG_MODE;
         };
 
@@ -565,9 +506,9 @@ impl Entry {
                 this_thread.replace(current());
             }
 
-            if let Some(thread) = this_thread {
+            if let Some(this_thread) = this_thread {
                 unsafe {
-                    (*sync_context.thread.get()).replace(thread);
+                    (*thread.get()).replace(this_thread);
                 }
                 if self.state.fetch_or(Self::WAKER_SET, Release) & Self::RESULT_SET
                     == Self::RESULT_SET
@@ -622,6 +563,53 @@ impl Entry {
         None
     }
 
+    /// Polls the result, asynchronously.
+    fn poll_result_async(&self, cx: &mut Context<'_>) -> Poll<u8> {
+        let Monitor::Async(waker) = &self.monitor else {
+            return Poll::Ready(Self::ERROR_WRONG_MODE);
+        };
+
+        if let Some(result) = self.try_consume_result() {
+            return Poll::Ready(result);
+        }
+
+        let mut this_waker = None;
+        let state = self.state.load(Acquire);
+        if state & Self::RESULT_SET == Self::RESULT_SET {
+            // No need to install the waker.
+            if let Some(result) = self.try_consume_result() {
+                return Poll::Ready(result);
+            }
+        } else if state & Self::WAKER_SET == Self::WAKER_SET {
+            // Replace the waker by clearing the flag first.
+            if self
+                .state
+                .compare_exchange_weak(state, state & !Self::WAKER_SET, AcqRel, Acquire)
+                .is_ok()
+            {
+                this_waker.replace(cx.waker().clone());
+            }
+        } else {
+            this_waker.replace(cx.waker().clone());
+        }
+
+        if let Some(this_waker) = this_waker {
+            unsafe {
+                (*waker.get()).replace(this_waker);
+            }
+            if self.state.fetch_or(Self::WAKER_SET, Release) & Self::RESULT_SET == Self::RESULT_SET
+            {
+                // The result has been set, so the waker will not be notified.
+                cx.waker().wake_by_ref();
+            }
+        } else {
+            // The waker is not set, so we need to wake the task.
+            cx.waker().wake_by_ref();
+        }
+
+        Poll::Pending
+    }
+
     /// Prepares for dropping `self`.
     ///
     /// The method cannot be implemented in `drop` because `Miri` treats the drop method in a
@@ -637,15 +625,6 @@ impl Entry {
             (this.drop_callback)(this);
             this.pollable.store(false, Release);
         }
-    }
-}
-
-impl Future for AwaitableEntry<'_> {
-    type Output = u8;
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.as_ref().0.poll_result_async(cx)
     }
 }
 

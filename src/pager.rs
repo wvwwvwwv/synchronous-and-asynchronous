@@ -6,7 +6,7 @@ use std::cell::UnsafeCell;
 use std::marker::{PhantomData, PhantomPinned};
 use std::pin::Pin;
 
-use crate::wait_queue::{AwaitableEntry, Entry, WaitQueue};
+use crate::wait_queue::{Entry, WaitQueue};
 
 /// Tasks holding a [`Pager`] can remotely acquire a desired resource.
 ///
@@ -97,9 +97,7 @@ impl<'s, S: SyncResult> Pager<'s, S> {
         if !self.is_registered() {
             return S::to_result(0, Some(Error::NotRegistered));
         }
-        let wait_queue = self.wait_queue();
-        let pinned_entry = AwaitableEntry(wait_queue.entry());
-        let result = pinned_entry.await;
+        let result = self.wait_queue().await;
         if result == Entry::ERROR_WRONG_MODE {
             return S::to_result(result, Some(Error::WrongMode));
         }
