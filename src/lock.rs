@@ -1,9 +1,7 @@
 //! [`Lock`] is a low-level locking primitive for both synchronous and asynchronous operations.
 
-#![deny(unsafe_code)]
-
 use std::fmt;
-use std::pin::{Pin, pin};
+use std::pin::Pin;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release};
@@ -255,13 +253,12 @@ impl Lock {
             }
             debug_assert_eq!(result, Self::NOT_ACQUIRED);
 
-            let async_wait = pin!(WaitQueue::default());
-            async_wait
-                .as_ref()
-                .construct(self, Opcode::Exclusive, false);
-            if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
+            let async_wait = WaitQueue::default();
+            let async_wait_pinned = async_wait.pin();
+            async_wait_pinned.construct(self, Opcode::Exclusive, false);
+            if self.try_push_wait_queue_entry(async_wait_pinned, state) {
                 begin_wait();
-                result = async_wait.as_ref().await;
+                result = async_wait_pinned.await;
                 debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
                 return result == Self::ACQUIRED;
             }
@@ -402,11 +399,12 @@ impl Lock {
             }
             debug_assert_eq!(result, Self::NOT_ACQUIRED);
 
-            let async_wait = pin!(WaitQueue::default());
-            async_wait.as_ref().construct(self, Opcode::Shared, false);
-            if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
+            let async_wait = WaitQueue::default();
+            let async_wait_pinned = async_wait.pin();
+            async_wait_pinned.construct(self, Opcode::Shared, false);
+            if self.try_push_wait_queue_entry(async_wait_pinned, state) {
                 begin_wait();
-                result = async_wait.as_ref().await;
+                result = async_wait_pinned.await;
                 debug_assert!(result == Self::ACQUIRED || result == Self::POISONED);
                 return result == Self::ACQUIRED;
             }

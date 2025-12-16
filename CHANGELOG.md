@@ -1,5 +1,9 @@
 # Changelog
 
+5.4.1
+
+* Optimize `Future` sizes.
+
 5.4.0
 
 * Add support for [`lock_api`](https://crates.io/crates/lock_api) to `Lock`.

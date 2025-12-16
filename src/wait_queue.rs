@@ -167,11 +167,15 @@ impl WaitQueue {
         }
     }
 
-    /// Gets a pinned reference.
+    /// Gets a pinned reference from `self`.
     #[inline]
-    pub(crate) const fn pinned_wait_queue<'l>(
-        wait_queue_ptr: *const WaitQueue,
-    ) -> Pin<&'l WaitQueue> {
+    pub(crate) const fn pin(&self) -> Pin<&WaitQueue> {
+        unsafe { Pin::new_unchecked(self) }
+    }
+
+    /// Gets a pinned reference from a pointer.
+    #[inline]
+    pub(crate) const fn pin_ptr<'l>(wait_queue_ptr: *const WaitQueue) -> Pin<&'l WaitQueue> {
         unsafe { Pin::new_unchecked(&*wait_queue_ptr) }
     }
 

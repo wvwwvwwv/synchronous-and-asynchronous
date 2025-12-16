@@ -4,7 +4,7 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
-use std::pin::{Pin, pin};
+use std::pin::Pin;
 #[cfg(not(feature = "loom"))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
@@ -328,13 +328,12 @@ impl Semaphore {
                 return true;
             }
 
-            let async_wait = pin!(WaitQueue::default());
-            async_wait
-                .as_ref()
-                .construct(self, Opcode::Semaphore(count), false);
-            if self.try_push_wait_queue_entry(async_wait.as_ref(), state) {
+            let async_wait = WaitQueue::default();
+            let async_wait_pinned = async_wait.pin();
+            async_wait_pinned.construct(self, Opcode::Semaphore(count), false);
+            if self.try_push_wait_queue_entry(async_wait_pinned, state) {
                 begin_wait();
-                async_wait.as_ref().await;
+                async_wait_pinned.await;
                 return true;
             }
         }

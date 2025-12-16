@@ -174,6 +174,6 @@ impl<'s, S: SyncResult> Pager<'s, S> {
     /// Returns a reference to the wait queue entry.
     #[inline]
     pub(crate) fn wait_queue(&self) -> Pin<&WaitQueue> {
-        WaitQueue::pinned_wait_queue(self.wait_queue.get())
+        WaitQueue::pin_ptr(self.wait_queue.get())
     }
 }
