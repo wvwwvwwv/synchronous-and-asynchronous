@@ -72,8 +72,8 @@ pub(crate) struct Entry {
     offset: u16,
 }
 
-/// Helper struct for pinning a [`WaitQueue`] to the stack and awaiting it without consuming it.
-pub(crate) struct PinnedEntry<'e>(pub(crate) Pin<&'e Entry>);
+/// Helper struct for awaiting a [`WaitQueue`] without consuming it.
+pub(crate) struct AwaitableEntry<'e>(pub(crate) Pin<&'e Entry>);
 
 /// Contextual data for asynchronous [`WaitQueue`].
 #[derive(Debug)]
@@ -190,14 +190,16 @@ impl WaitQueue {
 
     /// Gets a pinned reference.
     #[inline]
-    pub(crate) fn pinned_wait_queue<'l>(wait_queue_ptr: *const WaitQueue) -> Pin<&'l WaitQueue> {
+    pub(crate) const fn pinned_wait_queue<'l>(
+        wait_queue_ptr: *const WaitQueue,
+    ) -> Pin<&'l WaitQueue> {
         unsafe { Pin::new_unchecked(&*wait_queue_ptr) }
     }
 
     /// Returns a reference to the entry.
     #[inline]
-    pub(crate) fn entry(&self) -> &Entry {
-        unsafe { &*Self::to_entry_ptr(self.anchor_ptr().0) }
+    pub(crate) fn entry(&self) -> Pin<&Entry> {
+        unsafe { Pin::new(&*Self::to_entry_ptr(self.anchor_ptr().0)) }
     }
 
     /// Returns the entry pointer derived from the anchor pointer.
@@ -638,13 +640,12 @@ impl Entry {
     }
 }
 
-impl Future for PinnedEntry<'_> {
+impl Future for AwaitableEntry<'_> {
     type Output = u8;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        this.0.poll_result_async(cx)
+        self.as_ref().0.poll_result_async(cx)
     }
 }
 

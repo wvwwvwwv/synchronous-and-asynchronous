@@ -9,51 +9,66 @@ use crate::{Barrier, Gate, Lock, Pager, Semaphore, gate, lock};
 
 #[test]
 fn future_size() {
-    let limit = 184;
-    let limit_relaxed = 224;
+    let limit = 176;
+    let limit_relaxed = 216;
     let lock = Lock::default();
 
-    let lock_fut = &lock.lock_async();
-    assert!(size_of_val(lock_fut) < limit,);
+    let lock_fut_size = size_of_val(&lock.lock_async());
+    assert!(lock_fut_size <= limit, "{lock_fut_size}");
 
-    let lock_with_fut = &lock.lock_async_with(|| {});
-    assert!(size_of_val(lock_with_fut) < limit);
+    let lock_with_fut_size = size_of_val(&lock.lock_async_with(|| {}));
+    assert!(lock_with_fut_size <= limit, "{lock_with_fut_size}");
 
-    let share_fut = &lock.share_async();
-    assert!(size_of_val(share_fut) < limit);
+    let share_fut_size = size_of_val(&lock.share_async());
+    assert!(share_fut_size <= limit, "{share_fut_size}");
 
-    let share_with_fut = &lock.share_async_with(|| {});
-    assert!(size_of_val(share_with_fut) < limit);
+    let share_with_fut_size = size_of_val(&lock.share_async_with(|| {}));
+    assert!(share_with_fut_size <= limit, "{share_with_fut_size}");
 
     let barrier = Barrier::default();
 
-    let barrier_fut = &barrier.wait_async();
-    assert!(size_of_val(barrier_fut) < limit_relaxed);
+    let barrier_fut_size = size_of_val(&barrier.wait_async());
+    assert!(barrier_fut_size <= limit_relaxed, "{barrier_fut_size}");
 
-    let barrier_with_fut = &barrier.wait_async_with(|| {});
-    assert!(size_of_val(barrier_with_fut) < limit_relaxed);
+    let barrier_with_fut_size = size_of_val(&barrier.wait_async_with(|| {}));
+    assert!(
+        barrier_with_fut_size <= limit_relaxed,
+        "{barrier_with_fut_size}"
+    );
 
     let semaphore = Semaphore::default();
 
-    let acquire_fut = &semaphore.acquire_async();
-    assert!(size_of_val(acquire_fut) < limit_relaxed);
+    let acquire_fut_size = size_of_val(&semaphore.acquire_async());
+    assert!(acquire_fut_size <= limit_relaxed, "{acquire_fut_size}");
 
-    let acquire_with_fut = &semaphore.acquire_async_with(|| {});
-    assert!(size_of_val(acquire_with_fut) < limit_relaxed);
+    let acquire_with_fut_size = size_of_val(&semaphore.acquire_async_with(|| {}));
+    assert!(
+        acquire_with_fut_size <= limit_relaxed,
+        "{acquire_with_fut_size}"
+    );
 
-    let acquire_many_fut = &semaphore.acquire_many_async(1);
-    assert!(size_of_val(acquire_many_fut) < limit_relaxed);
+    let acquire_many_fut_size = size_of_val(&semaphore.acquire_many_async(1));
+    assert!(
+        acquire_many_fut_size <= limit_relaxed,
+        "{acquire_many_fut_size}"
+    );
 
-    let acquire_many_with_fut = &semaphore.acquire_many_async_with(1, || {});
-    assert!(size_of_val(acquire_many_with_fut) < limit_relaxed);
+    let acquire_many_with_fut_size = size_of_val(&semaphore.acquire_many_async_with(1, || {}));
+    assert!(
+        acquire_many_with_fut_size <= limit_relaxed,
+        "{acquire_many_with_fut_size}"
+    );
 
     let gate = Gate::default();
 
-    let enter_fut = &gate.enter_async();
-    assert!(size_of_val(enter_fut) < limit_relaxed);
+    let enter_fut_size = size_of_val(&gate.enter_async());
+    assert!(enter_fut_size <= limit_relaxed, "{enter_fut_size}");
 
-    let enter_with_fut = &gate.enter_async_with(|| {});
-    assert!(size_of_val(enter_with_fut) < limit_relaxed);
+    let enter_with_fut_size = size_of_val(&gate.enter_async_with(|| {}));
+    assert!(
+        enter_with_fut_size <= limit_relaxed,
+        "{enter_with_fut_size}"
+    );
 }
 
 #[cfg_attr(miri, ignore = "Tokio is not compatible with Miri")]
