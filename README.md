@@ -1,3 +1,7 @@
+# Moved to [`codeberg`](https://codeberg.org/wvwwvwwv/synchronous-and-asynchronous)
+
+This repository has been moved to [codeberg](https://codeberg.org/wvwwvwwv/synchronous-and-asynchronous), and will no longer be maintained here.
+
 # Synchronous and Asynchronous Synchronization Primitives
 
 [![Cargo](https://img.shields.io/crates/v/saa)](https://crates.io/crates/saa)
